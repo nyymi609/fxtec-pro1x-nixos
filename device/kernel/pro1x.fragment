@@ -1,0 +1,168 @@
+# Pro1X additions on top of arm64 defconfig. Applied by scripts/gen-kernel-config.sh,
+# which resolves dependencies with the kernel's own Kconfig and FAILS if any line
+# below does not end up with the requested value.
+#
+# Everything needed to mount userdata and light the panel is built in (=y): the
+# initrd does no module loading for early boot.
+
+# --- storage: root on UFS -----------------------------------------------------
+CONFIG_SCSI_UFSHCD=y
+CONFIG_SCSI_UFSHCD_PLATFORM=y
+CONFIG_SCSI_UFS_QCOM=y
+CONFIG_PHY_QCOM_QMP=y
+CONFIG_PHY_QCOM_QMP_UFS=y
+CONFIG_EXT4_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_SM_GCC_6115=y
+CONFIG_PINCTRL_SM6115=y
+CONFIG_INTERCONNECT_QCOM_SM6115=y
+CONFIG_INTERCONNECT_QCOM_SMD_RPM=y
+CONFIG_QCOM_SMD_RPM=y
+CONFIG_RPMSG_QCOM_SMD=y
+CONFIG_RPMSG_QCOM_GLINK_RPM=y
+CONFIG_REGULATOR_QCOM_SMD_RPM=y
+CONFIG_QCOM_CLK_SMD_RPM=y
+CONFIG_QCOM_RPMPD=y
+
+# --- display (BOE BF060Y8M-AJ0 on DSI) ---------------------------------------
+# DRM_MSM and the panel driver can only be built in if their dependencies are.
+CONFIG_QCOM_LLCC=y
+CONFIG_QCOM_OCMEM=y
+CONFIG_QCOM_COMMAND_DB=y
+CONFIG_DRM=y
+CONFIG_BACKLIGHT_CLASS_DEVICE=y
+CONFIG_DRM_MSM=y
+CONFIG_DRM_PANEL_BOE_BF060Y8M_AJ0=y
+CONFIG_DRM_FBDEV_EMULATION=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FB_SIMPLE=y
+
+# --- touch (Goodix GT9286 via PCA9534 expander) and keys ---------------------
+CONFIG_GPIO_PCA953X=y
+# Module, not built-in: the controller configuration (goodix_9286_cfg.bin) is
+# loaded with the firmware loader, which only works once the root filesystem is up.
+CONFIG_TOUCHSCREEN_GOODIX=m
+CONFIG_KEYBOARD_GPIO=y
+CONFIG_LEDS_GPIO=y
+
+# --- USB: gadget serial for debugging, PMI632 Type-C --------------------------
+CONFIG_USB_GADGET=y
+# Serial (ttyGS0) + CDC ECM ethernet (usb0) in one precomposed gadget.
+# CONFIG_USB_G_SERIAL is not set
+CONFIG_USB_CDC_COMPOSITE=y
+CONFIG_U_SERIAL_CONSOLE=y
+CONFIG_TYPEC=y
+CONFIG_TYPEC_TCPM=y
+CONFIG_TYPEC_QCOM_PMIC=y
+CONFIG_PHY_QCOM_QUSB2=y
+CONFIG_PHY_QCOM_QMP_USB=y
+CONFIG_SERIAL_QCOM_GENI=y
+CONFIG_SERIAL_QCOM_GENI_CONSOLE=y
+
+# --- remoteprocs, modem plumbing, wifi (modules: loaded after rootfs mounts) --
+CONFIG_QCOM_Q6V5_PAS=m
+CONFIG_QCOM_IPA=m
+CONFIG_QRTR=y
+CONFIG_QRTR_SMD=y
+CONFIG_QRTR_TUN=y
+CONFIG_ATH10K=m
+CONFIG_ATH10K_SNOC=m
+CONFIG_BT_QCA=m
+
+# --- required by NixOS/systemd but not in arm64 defconfig ---------------------
+CONFIG_CRYPTO_USER_API_HASH=y
+
+# --- the kernel release must be exactly 7.1.0 (modDirVersion): no -g<hash> suffix
+# CONFIG_LOCALVERSION_AUTO is not set
+
+# --- keep the build small: defconfig enables full DWARF debug info ------------
+CONFIG_DEBUG_INFO_NONE=y
+
+# --- initrd compression / EFI stub ---------------------------------------------
+CONFIG_RD_ZSTD=y
+CONFIG_RD_GZIP=y
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+
+# Clock controllers and the I2C bus the display/GPU/touch/expander chain needs
+# at boot. As modules (arm64 defconfig default) mdss/adreno/smmu hit the
+# deferred-probe timeout (-110) before udev loads them and the panel never lights.
+CONFIG_SM_DISPCC_6115=y
+CONFIG_SM_GPUCC_6115=y
+CONFIG_I2C_QCOM_GENI=y
+CONFIG_I2C_GPIO=y
+
+# GPI DMA is what the GENI I2C buses use on this board; as a module the touch
+# controller only probed after udev loaded it (~47 s into boot).
+CONFIG_QCOM_GPI_DMA=y
+
+# Firewall (NixOS default firewall: iptables-nft or nftables). The arm64
+# defconfig ships almost none of this.
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_NF_TABLES=m
+CONFIG_NF_TABLES_INET=y
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NF_TABLES_IPV6=y
+CONFIG_NFT_CT=m
+CONFIG_NFT_LOG=m
+CONFIG_NFT_LIMIT=m
+CONFIG_NFT_NAT=m
+CONFIG_NFT_MASQ=m
+CONFIG_NFT_REJECT=m
+CONFIG_NFT_COMPAT=m
+CONFIG_NF_NAT=m
+CONFIG_NF_REJECT_IPV4=m
+CONFIG_NF_REJECT_IPV6=m
+CONFIG_NETFILTER_XTABLES_LEGACY=y
+CONFIG_IP_NF_IPTABLES_LEGACY=m
+CONFIG_IP6_NF_IPTABLES_LEGACY=m
+CONFIG_IP_NF_FILTER=m
+CONFIG_IP_NF_TARGET_REJECT=m
+CONFIG_IP_NF_MANGLE=m
+CONFIG_IP_NF_NAT=m
+CONFIG_IP_NF_TARGET_MASQUERADE=m
+CONFIG_IP6_NF_FILTER=m
+CONFIG_IP6_NF_TARGET_REJECT=m
+CONFIG_IP6_NF_MANGLE=m
+CONFIG_IP6_NF_NAT=m
+CONFIG_IP6_NF_TARGET_MASQUERADE=m
+CONFIG_NETFILTER_XT_MATCH_PKTTYPE=m
+CONFIG_NETFILTER_XT_MATCH_MULTIPORT=m
+CONFIG_NETFILTER_XT_MATCH_STATE=m
+CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=m
+CONFIG_NETFILTER_XT_MATCH_COMMENT=m
+CONFIG_NETFILTER_XT_TARGET_MASQUERADE=m
+CONFIG_NETFILTER_XT_TARGET_REDIRECT=m
+CONFIG_NETFILTER_XT_NAT=m
+
+# Protection domain mapper in the kernel (replaces the pd-mapper daemon); needed by
+# the modem/ADSP remoteprocs and Wi-Fi. Built in so it is there before remoteprocs start.
+CONFIG_QCOM_PD_MAPPER=y
+
+# Audio: LPASS resets needed by the SoundWire controllers (SoC macro/codec drivers
+# are already modules in arm64 defconfig), speaker amplifiers (Awinic AW87339,
+# behind the HPH outputs) and the voice-call DSP interface.
+CONFIG_SM_LPASSCC_6115=m
+CONFIG_SND_SOC_AW87339=m
+CONFIG_SND_SOC_QDSP6_Q6VOICE=m
+
+# Hardware keyboard (AW9523B matrix driver), built in so it works as early as the
+# console; keyd needs uinput.
+CONFIG_KEYBOARD_PRO1X_AW9523=y
+CONFIG_INPUT_UINPUT=m
+
+# Vibration motor (Awinic AW86224/5, force feedback), battery level estimate and
+# charger input current limit / watchdog.
+CONFIG_INPUT_AW86224=m
+CONFIG_BATTERY_PRO1X_ADC=m
+CONFIG_CHARGER_PRO1X_ICL=m
+
+# Cameras: front S5K4H7, rear IMX582 + DW9800 lens, dma-buf providers for the
+# libcamera software ISP.
+CONFIG_VIDEO_S5K4H7=m
+CONFIG_VIDEO_IMX582=m
+CONFIG_VIDEO_DW9800=m
+CONFIG_UDMABUF=y
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y

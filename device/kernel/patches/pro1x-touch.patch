@@ -1,0 +1,78 @@
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index 466ad409e..f7ebc8402 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -140,27 +140,45 @@ pca9534: gpio@21 {
+ 	};
+ };
+ 
+-&i2c2 {
+-	status = "okay";
+-	/* Clock frequency was not specified downstream, let's park it to 100 KHz */
+-	clock-frequency = <100000>;
++/ {
++	ts_i2c: i2c-touchscreen {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 6 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 7 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <5>;
++
++		pinctrl-0 = <&ts_i2c_gpio>;
++		pinctrl-names = "default";
+ 
+-	touchscreen@14 {
+-		compatible = "goodix,gt9286";
+-		reg = <0x14>;
++		#address-cells = <1>;
++		#size-cells = <0>;
+ 
+-		interrupts-extended = <&tlmm 80 IRQ_TYPE_LEVEL_LOW>;
++		touchscreen@14 {
++			compatible = "goodix,gt9286";
++			reg = <0x14>;
+ 
+-		irq-gpios = <&tlmm 80 IRQ_TYPE_LEVEL_LOW>;
+-		reset-gpios = <&tlmm 71 GPIO_ACTIVE_HIGH>;
+-		AVDD28-supply = <&ts_vdd_supply>;
+-		VDDIO-supply = <&ts_vddio_supply>;
++			interrupts-extended = <&tlmm 80 IRQ_TYPE_LEVEL_LOW>;
+ 
+-		pinctrl-0 = <&ts_int_n>, <&ts_rst_n>;
+-		pinctrl-names = "default";
++			irq-gpios = <&tlmm 80 GPIO_ACTIVE_LOW>;
++			reset-gpios = <&tlmm 71 GPIO_ACTIVE_HIGH>;
++			AVDD28-supply = <&ts_vdd_supply>;
++			VDDIO-supply = <&ts_vddio_supply>;
++
++			pinctrl-0 = <&ts_int_n>, <&ts_rst_n>;
++			pinctrl-names = "default";
++		};
+ 	};
+ };
+ 
++&i2c2 {
++	/*
++	 * The GPI DMA engine behind this GENI SE wedges about 30 s after the
++	 * touchscreen starts polling, so the Goodix controller is driven over
++	 * a bit-banged bus on the same pins instead.
++	 */
++	status = "disabled";
++};
++
+ &mdss {
+ 	status = "okay";
+ };
+@@ -498,6 +516,13 @@ ts_rst_n: ts-rst-n-state {
+ 		bias-pull-up;
+ 	};
+ 
++	ts_i2c_gpio: ts-i2c-gpio-state {
++		pins = "gpio6", "gpio7";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++
+ 	ts_int_n: ts-int-n-state {
+ 		pins = "gpio80";
+ 		function = "gpio";

@@ -1,0 +1,335 @@
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index 871a198e8..b00822f98 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -350,6 +350,12 @@ pca9534: gpio@21 {
+ 		#gpio-cells = <2>;
+ 	};
+ 
++	haptics: haptics@58 {
++		compatible = "awinic,aw86224";
++		reg = <0x58>;
++		reset-gpios = <&tlmm 68 GPIO_ACTIVE_LOW>;
++	};
++
+ 	gpioext0: gpio-expander@5b {
+ 		/* 8x8 keyboard matrix behind an AW9523B, see pro1x-aw9523-kbd.c */
+ 		compatible = "fxtec,pro1x-aw9523-keypad";
+diff --git a/drivers/input/misc/Kconfig b/drivers/input/misc/Kconfig
+index 94a753fcb..4cedeaac4 100644
+--- a/drivers/input/misc/Kconfig
++++ b/drivers/input/misc/Kconfig
+@@ -126,6 +126,18 @@ config INPUT_ATMEL_CAPTOUCH
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called atmel_captouch.
+ 
++config INPUT_AW86224
++	tristate "Awinic AW86224/AW86225 haptic driver (continuous mode)"
++	depends on INPUT && I2C
++	select INPUT_FF_MEMLESS
++	select REGMAP_I2C
++	help
++	  Minimal driver for the Awinic AW86224/5 LRA haptic chip, exposing
++	  FF_RUMBLE using the chip's continuous drive mode.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called aw86224.
++
+ config INPUT_AW86927
+ 	tristate "Awinic AW86927 Haptic Driver Support"
+ 	depends on I2C && INPUT
+diff --git a/drivers/input/misc/Makefile b/drivers/input/misc/Makefile
+index 415fc4e29..d51e4dbdd 100644
+--- a/drivers/input/misc/Makefile
++++ b/drivers/input/misc/Makefile
+@@ -22,6 +22,7 @@ obj-$(CONFIG_INPUT_ATC260X_ONKEY)	+= atc260x-onkey.o
+ obj-$(CONFIG_INPUT_ATI_REMOTE2)		+= ati_remote2.o
+ obj-$(CONFIG_INPUT_ATLAS_BTNS)		+= atlas_btns.o
+ obj-$(CONFIG_INPUT_ATMEL_CAPTOUCH)	+= atmel_captouch.o
++obj-$(CONFIG_INPUT_AW86224)		+= aw86224.o
+ obj-$(CONFIG_INPUT_AW86927)		+= aw86927.o
+ obj-$(CONFIG_INPUT_BBNSM_PWRKEY)	+= nxp-bbnsm-pwrkey.o
+ obj-$(CONFIG_INPUT_BMA150)		+= bma150.o
+diff --git a/drivers/input/misc/aw86224.c b/drivers/input/misc/aw86224.c
+new file mode 100644
+index 000000000..4a2c5b419
+--- /dev/null
++++ b/drivers/input/misc/aw86224.c
+@@ -0,0 +1,277 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Awinic AW86224/AW86225 LRA haptic driver (minimal, continuous mode only).
++ *
++ * Register values derived from the vendor (aw8622x) driver. Only CONT
++ * (continuous resonant drive) mode is implemented, exposed through the
++ * input force-feedback FF_RUMBLE interface. No RAM/RTP waveforms, no f0
++ * calibration, no trigger pins.
++ */
++#include <linux/delay.h>
++#include <linux/bitfield.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/module.h>
++#include <linux/mod_devicetable.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++#define AW_REG_ID		0x00
++#define AW_REG_PLAYCFG3		0x08
++#define AW_REG_PLAYCFG4		0x09
++#define AW_REG_CONTCFG1		0x18
++#define AW_REG_CONTCFG5		0x1c
++#define AW_REG_CONTCFG6		0x1d
++#define AW_REG_CONTCFG7		0x1e
++#define AW_REG_CONTCFG8		0x1f
++#define AW_REG_CONTCFG9		0x20
++#define AW_REG_CONTCFG10	0x21
++#define AW_REG_CONTCFG11	0x22
++#define AW_REG_CONTCFG13	0x24
++#define AW_REG_TRGCFG8		0x3a
++#define AW_REG_GLBRD5		0x3f
++#define AW_REG_SYSCTRL1		0x43
++#define AW_REG_SYSCTRL2		0x44
++#define AW_REG_SYSCTRL3		0x45
++#define AW_REG_SYSCTRL7		0x49
++#define AW_REG_PWMCFG1		0x4c
++#define AW_REG_PWMCFG3		0x4e
++#define AW_REG_DETCFG2		0x52
++#define AW_REG_TRIMCFG1		0x58
++#define AW_REG_TRIMCFG3		0x5a
++#define AW_REG_ANACFG8		0x77
++#define AW_REG_EFRD9		0x64
++
++#define AW_SOFTRESET		0xaa
++#define AW_PLAY_MODE_MASK	GENMASK(1, 0)
++#define AW_PLAY_MODE_CONT	2
++#define AW_GO			BIT(0)
++#define AW_STOP			BIT(1)
++#define AW_TRACK_EN		BIT(7)
++#define AW_VBAT_MODE_HW		BIT(7)
++#define AW_RAMINIT		BIT(3)
++#define AW_STANDBY		BIT(6)
++#define AW_RATE_MASK		GENMASK(1, 0)
++#define AW_RATE_12K		2
++#define AW_DIAG_GO		BIT(0)
++#define AW_RL_TRIM_SRC_REG	BIT(6)
++#define AW_PWMCFG_PROT_EN	BIT(7)
++#define AW_TRGCFG8_TRIG_MASK	GENMASK(4, 3)
++#define AW_TRGCFG8_DISABLE	3
++#define AW_ANACFG8_HDRV_MASK	GENMASK(7, 6)
++#define AW_D2S_GAIN_MASK	GENMASK(2, 0)
++
++/* Values from the stock Pro1X device tree */
++#define DRV1_LVL_MAX		0x7f
++#define DRV2_LVL_MAX		0x3b
++
++struct aw86224 {
++	struct i2c_client *client;
++	struct regmap *regmap;
++	struct gpio_desc *reset;
++	struct input_dev *input;
++	struct work_struct play_work;
++	atomic_t magnitude;
++};
++
++static const struct regmap_config aw86224_regmap = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = 0x80,
++	.cache_type = REGCACHE_NONE,
++};
++
++static int aw_stop(struct aw86224 *aw)
++{
++	unsigned int v;
++	int i, ret;
++
++	ret = regmap_write(aw->regmap, AW_REG_PLAYCFG4, AW_STOP);
++	if (ret)
++		return ret;
++
++	for (i = 0; i < 20; i++) {
++		ret = regmap_read(aw->regmap, AW_REG_GLBRD5, &v);
++		if (ret)
++			return ret;
++		v &= 0x0f;
++		if (v == 0 || v == 0x0a)
++			return 0;
++		usleep_range(2000, 3000);
++	}
++	return -ETIMEDOUT;
++}
++
++static int aw_init(struct aw86224 *aw)
++{
++	static const u8 sine[4] = { 0x05, 0xb2, 0xff, 0xef };
++	struct regmap *r = aw->regmap;
++	unsigned int v;
++	int ret;
++
++	if (aw->reset) {
++		gpiod_set_value_cansleep(aw->reset, 1);
++		usleep_range(2000, 3000);
++		gpiod_set_value_cansleep(aw->reset, 0);
++		usleep_range(4000, 5000);
++	}
++
++	ret = regmap_write(r, AW_REG_ID, AW_SOFTRESET);
++	if (ret)
++		return ret;
++	usleep_range(3000, 4000);
++
++	ret = regmap_update_bits(r, AW_REG_SYSCTRL2, AW_RATE_MASK, AW_RATE_12K);
++	if (ret)
++		return ret;
++	/* make sure we are not in standby */
++	regmap_update_bits(r, AW_REG_SYSCTRL2, AW_STANDBY, 0);
++
++	ret = regmap_bulk_write(r, AW_REG_SYSCTRL3, sine, sizeof(sine));
++	if (ret)
++		return ret;
++
++	regmap_update_bits(r, AW_REG_TRGCFG8, AW_TRGCFG8_TRIG_MASK,
++			   FIELD_PREP(AW_TRGCFG8_TRIG_MASK, AW_TRGCFG8_DISABLE));
++	regmap_update_bits(r, AW_REG_ANACFG8, AW_ANACFG8_HDRV_MASK,
++			   AW_ANACFG8_HDRV_MASK);
++	regmap_update_bits(r, AW_REG_SYSCTRL7, AW_D2S_GAIN_MASK, 5);
++	regmap_write(r, AW_REG_CONTCFG13, (6 << 4) | 2);	/* tset, bemf */
++	regmap_write(r, AW_REG_CONTCFG10, 6);			/* brake time */
++	regmap_update_bits(r, AW_REG_CONTCFG5, 0x0f, 8);	/* brake gain */
++	regmap_write(r, AW_REG_CONTCFG8, 4);			/* drv1 time */
++	regmap_write(r, AW_REG_CONTCFG9, 0x14);			/* drv2 time */
++	regmap_write(r, AW_REG_CONTCFG11, 0x12);		/* track margin */
++
++	/* motor protection off */
++	regmap_update_bits(r, AW_REG_PWMCFG1, AW_PWMCFG_PROT_EN, 0);
++	regmap_update_bits(r, AW_REG_PWMCFG3, AW_PWMCFG_PROT_EN, 0);
++
++	/* offset calibration */
++	regmap_update_bits(r, AW_REG_SYSCTRL1, AW_RAMINIT, AW_RAMINIT);
++	regmap_update_bits(r, AW_REG_DETCFG2, AW_DIAG_GO, AW_DIAG_GO);
++	usleep_range(2000, 3000);
++	regmap_update_bits(r, AW_REG_SYSCTRL1, AW_RAMINIT, 0);
++
++	regmap_update_bits(r, AW_REG_SYSCTRL1, AW_VBAT_MODE_HW, AW_VBAT_MODE_HW);
++	regmap_update_bits(r, AW_REG_TRIMCFG1, AW_RL_TRIM_SRC_REG, AW_RL_TRIM_SRC_REG);
++	regmap_update_bits(r, AW_REG_TRIMCFG3, 0x3f, 0);
++
++	regmap_read(r, AW_REG_CONTCFG1, &v);
++	return aw_stop(aw);
++}
++
++static void aw_play_work(struct work_struct *work)
++{
++	struct aw86224 *aw = container_of(work, struct aw86224, play_work);
++	struct regmap *r = aw->regmap;
++	unsigned int mag = atomic_read(&aw->magnitude);
++	unsigned int d1, d2;
++
++	if (!mag) {
++		aw_stop(aw);
++		return;
++	}
++
++	d1 = max(1u, DIV_ROUND_UP(mag * DRV1_LVL_MAX, 0xffff));
++	d2 = max(1u, DIV_ROUND_UP(mag * DRV2_LVL_MAX, 0xffff));
++
++	regmap_update_bits(r, AW_REG_PLAYCFG3, AW_PLAY_MODE_MASK, AW_PLAY_MODE_CONT);
++	regmap_write(r, AW_REG_CONTCFG6, AW_TRACK_EN | d1);
++	regmap_write(r, AW_REG_CONTCFG7, d2);
++	regmap_write(r, AW_REG_PLAYCFG4, AW_GO);
++}
++
++static int aw_play_effect(struct input_dev *dev, void *data,
++			  struct ff_effect *effect)
++{
++	struct aw86224 *aw = input_get_drvdata(dev);
++	u16 s = effect->u.rumble.strong_magnitude;
++	u16 w = effect->u.rumble.weak_magnitude;
++
++	atomic_set(&aw->magnitude, max(s, w));
++	schedule_work(&aw->play_work);
++	return 0;
++}
++
++static int aw86224_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct aw86224 *aw;
++	unsigned int id, efrd;
++	int ret;
++
++	aw = devm_kzalloc(dev, sizeof(*aw), GFP_KERNEL);
++	if (!aw)
++		return -ENOMEM;
++	aw->client = client;
++	INIT_WORK(&aw->play_work, aw_play_work);
++
++	aw->regmap = devm_regmap_init_i2c(client, &aw86224_regmap);
++	if (IS_ERR(aw->regmap))
++		return PTR_ERR(aw->regmap);
++
++	aw->reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(aw->reset))
++		return dev_err_probe(dev, PTR_ERR(aw->reset), "reset gpio\n");
++
++	ret = aw_init(aw);
++	if (ret)
++		return dev_err_probe(dev, ret, "init failed\n");
++
++	ret = regmap_read(aw->regmap, AW_REG_ID, &id);
++	if (!ret)
++		ret = regmap_read(aw->regmap, AW_REG_EFRD9, &efrd);
++	if (ret)
++		return ret;
++	dev_info(dev, "chip id 0x%02x efrd9 0x%02x\n", id, efrd);
++
++	aw->input = devm_input_allocate_device(dev);
++	if (!aw->input)
++		return -ENOMEM;
++	aw->input->name = "aw86224-haptics";
++	aw->input->id.bustype = BUS_I2C;
++	input_set_drvdata(aw->input, aw);
++	input_set_capability(aw->input, EV_FF, FF_RUMBLE);
++
++	ret = input_ff_create_memless(aw->input, NULL, aw_play_effect);
++	if (ret)
++		return ret;
++
++	i2c_set_clientdata(client, aw);
++	return input_register_device(aw->input);
++}
++
++static void aw86224_remove(struct i2c_client *client)
++{
++	struct aw86224 *aw = i2c_get_clientdata(client);
++
++	cancel_work_sync(&aw->play_work);
++	aw_stop(aw);
++}
++
++static void aw86224_shutdown(struct i2c_client *client)
++{
++	aw86224_remove(client);
++}
++
++static const struct of_device_id aw86224_of_match[] = {
++	{ .compatible = "awinic,aw86224" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, aw86224_of_match);
++
++static struct i2c_driver aw86224_driver = {
++	.driver = {
++		.name = "aw86224",
++		.of_match_table = aw86224_of_match,
++	},
++	.probe = aw86224_probe,
++	.remove = aw86224_remove,
++	.shutdown = aw86224_shutdown,
++};
++module_i2c_driver(aw86224_driver);
++
++MODULE_DESCRIPTION("Awinic AW86224/5 haptic driver (continuous mode)");
++MODULE_LICENSE("GPL");

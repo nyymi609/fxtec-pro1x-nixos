@@ -1,0 +1,765 @@
+diff --git a/Documentation/devicetree/bindings/sound/awinic,aw87339.yaml b/Documentation/devicetree/bindings/sound/awinic,aw87339.yaml
+new file mode 100644
+index 000000000..89c5cdada
+--- /dev/null
++++ b/Documentation/devicetree/bindings/sound/awinic,aw87339.yaml
+@@ -0,0 +1,48 @@
++# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/sound/awinic,aw87339.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Awinic AW87339 class-K speaker amplifier
++
++maintainers:
++  - Nyymi <accee22@protonmail.com>
++
++allOf:
++  - $ref: dai-common.yaml#
++
++properties:
++  compatible:
++    const: awinic,aw87339
++
++  reg:
++    maxItems: 1
++
++  enable-gpios:
++    maxItems: 1
++    description: Chip enable line, high powers the amplifier.
++
++  sound-name-prefix: true
++
++required:
++  - compatible
++  - reg
++  - enable-gpios
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/gpio/gpio.h>
++    i2c {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        amplifier@59 {
++            compatible = "awinic,aw87339";
++            reg = <0x59>;
++            enable-gpios = <&tlmm 85 GPIO_ACTIVE_HIGH>;
++            sound-name-prefix = "Spk0";
++        };
++    };
+diff --git a/Documentation/devicetree/bindings/sound/qcom,sm8250.yaml b/Documentation/devicetree/bindings/sound/qcom,sm8250.yaml
+index 15f38622b..169f698cd 100644
+--- a/Documentation/devicetree/bindings/sound/qcom,sm8250.yaml
++++ b/Documentation/devicetree/bindings/sound/qcom,sm8250.yaml
+@@ -31,6 +31,7 @@ properties:
+       - enum:
+           - fairphone,fp4-sndcard
+           - fairphone,fp5-sndcard
++          - fxtec,pro1x-sndcard
+           - qcom,apq8096-sndcard
+           - qcom,glymur-sndcard
+           - qcom,qcm6490-idp-sndcard
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index f7ebc8402..3375adc35 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -138,9 +138,157 @@ pca9534: gpio@21 {
+ 		gpio-controller;
+ 		#gpio-cells = <2>;
+ 	};
++
++	spk_amp0: speaker-amplifier@59 {
++		compatible = "awinic,aw87339";
++		reg = <0x59>;
++		enable-gpios = <&tlmm 85 GPIO_ACTIVE_HIGH>;
++		pinctrl-0 = <&spk_amp_default>;
++		pinctrl-names = "default";
++		sound-name-prefix = "Spk0";
++	};
++
++	spk_amp1: speaker-amplifier@5a {
++		compatible = "awinic,aw87339";
++		reg = <0x5a>;
++		enable-gpios = <&tlmm 98 GPIO_ACTIVE_HIGH>;
++		pinctrl-0 = <&spk_amp_default>;
++		pinctrl-names = "default";
++		sound-name-prefix = "Spk1";
++	};
+ };
+ 
+ / {
++	wcd9370: audio-codec {
++		compatible = "qcom,wcd9370-codec";
++
++		pinctrl-0 = <&wcd_reset_default>;
++		pinctrl-names = "default";
++
++		reset-gpios = <&tlmm 92 GPIO_ACTIVE_LOW>;
++
++		vdd-buck-supply = <&pm6125_l14a>;
++		vdd-rxtx-supply = <&pm6125_l9a>;
++		vdd-px-supply = <&pm6125_l9a>;
++		/* Input rail of the codec's mic-bias generators (scuba/PM6125 downstream: L22A) */
++		vdd-mic-bias-supply = <&pm6125_l22a>;
++
++		qcom,micbias1-microvolt = <1800000>;
++		qcom,micbias2-microvolt = <1800000>;
++		qcom,micbias3-microvolt = <1800000>;
++		qcom,micbias4-microvolt = <1800000>;
++
++		qcom,rx-device = <&wcd937x_rx>;
++		qcom,tx-device = <&wcd937x_tx>;
++
++		#sound-dai-cells = <1>;
++	};
++
++	sound {
++		compatible = "fxtec,pro1x-sndcard";
++		model = "F(x)tec Pro1X";
++
++		audio-routing = "IN1_HPHL", "HPHL_OUT",
++				"IN2_HPHR", "HPHR_OUT",
++				"AMIC1", "MIC BIAS1",
++				"AMIC2", "MIC BIAS2",
++				"AMIC3", "MIC BIAS3",
++				/*
++				 * Analog mic ADCs on the TX SoundWire lanes. Same lanes as
++				 * the downstream kernel (ADC1 on SWR_MIC0, ADC2 on SWR_MIC4).
++				 */
++				"TX SWR_INPUT0", "ADC1_OUTPUT",
++				"TX SWR_INPUT4", "ADC2_OUTPUT",
++				/*
++				 * The built-in microphones are digital: the stock Android
++				 * config uses DMIC3 for both the handset and the speaker mic.
++				 */
++				"VA DMIC0", "VA MIC BIAS1",
++				"VA DMIC1", "VA MIC BIAS1",
++				"VA DMIC2", "VA MIC BIAS1",
++				"VA DMIC3", "VA MIC BIAS1",
++				/* the speaker amplifiers sit behind the HPH outputs */
++				"Spk0 IN", "HPHL_OUT",
++				"Spk1 IN", "HPHR_OUT";
++
++		aux-devs = <&spk_amp0>, <&spk_amp1>;
++
++		/* "Spk0 OUT Switch" / "Spk1 OUT Switch" mute the speakers */
++		pin-switches = "Spk0 OUT", "Spk1 OUT";
++
++		mm1-dai-link {
++			link-name = "MultiMedia1";
++
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
++			};
++		};
++
++		mm2-dai-link {
++			link-name = "MultiMedia2";
++
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
++			};
++		};
++
++		mm3-dai-link {
++			link-name = "MultiMedia3";
++
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
++			};
++		};
++
++		wcd-playback-dai-link {
++			link-name = "WCD Playback";
++
++			codec {
++				sound-dai = <&wcd9370 0>, <&swr1 0>, <&rxmacro 0>;
++			};
++
++			cpu {
++				sound-dai = <&q6afedai RX_CODEC_DMA_RX_0>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++		};
++
++		va-capture-dai-link {
++			link-name = "VA Capture";
++
++			codec {
++				sound-dai = <&vamacro 0>;
++			};
++
++			cpu {
++				sound-dai = <&q6afedai VA_CODEC_DMA_TX_0>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++		};
++
++		wcd-capture-dai-link {
++			link-name = "WCD Capture";
++
++			codec {
++				sound-dai = <&wcd9370 1>, <&swr0 0>, <&txmacro 0>;
++			};
++
++			cpu {
++				sound-dai = <&q6afedai TX_CODEC_DMA_TX_3>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++		};
++	};
++
+ 	ts_i2c: i2c-touchscreen {
+ 		compatible = "i2c-gpio";
+ 		sda-gpios = <&tlmm 6 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+@@ -179,6 +327,85 @@ &i2c2 {
+ 	status = "disabled";
+ };
+ 
++&rxmacro {
++	pinctrl-0 = <&lpass_rx_swr_active>;
++	pinctrl-names = "default";
++};
++
++&lpass_tlmm {
++	/* LPASS DMIC pair 2/3: clock on gpio8, data on gpio9 (downstream: func1) */
++	lpass_dmic23_active: lpass-dmic23-active-state {
++		clk-pins {
++			pins = "gpio8";
++			function = "dmic23_clk";
++			drive-strength = <8>;
++			output-high;
++		};
++
++		data-pins {
++			pins = "gpio9";
++			function = "dmic23_data";
++			drive-strength = <8>;
++			input-enable;
++		};
++	};
++};
++
++&vamacro {
++	pinctrl-0 = <&lpass_dmic23_active>;
++	pinctrl-names = "default";
++
++	qcom,dmic-sample-rate = <2400000>;
++};
++
++&txmacro {
++	pinctrl-0 = <&lpass_tx_swr_active>;
++	pinctrl-names = "default";
++};
++
++&swr0 {
++	wcd937x_tx: codec@0,3 {
++		compatible = "sdw20217010a00";
++		reg = <0 3>;
++
++		/*
++		 * WCD9370 TX Port 1 (ADC1)               <=> SWR0 Port 1
++		 * WCD9370 TX Port 2 (ADC2, 3)            <=> SWR0 Port 1
++		 * WCD9370 TX Port 3 (DMIC0,1,2,3 & MBHC) <=> SWR0 Port 2
++		 * WCD9370 TX Port 4 (DMIC4,5,6,7)        <=> SWR0 Port 3
++		 */
++		qcom,tx-port-mapping = <1 1 2 3>;
++
++		/*
++		 * Channel mapping in slave port channel order: adc1, adc2, adc3,
++		 * dmic0, dmic1, mbhc, dmic2, dmic3, dmic4, dmic5, dmic6, dmic7.
++		 */
++		qcom,tx-channel-mapping = /bits/ 8 <1 2 1 1 2 3 3 4 1 2 3>;
++	};
++};
++
++&swr1 {
++	wcd937x_rx: codec@0,4 {
++		compatible = "sdw20217010a00";
++		reg = <0 4>;
++
++		/*
++		 * WCD9370 RX Port 1 (HPH_L/R) <=> SWR1 Port 1 (HPH_L/R)
++		 * WCD9370 RX Port 2 (CLSH)    <=> SWR1 Port 2 (CLSH)
++		 * WCD9370 RX Port 3 (COMP_L/R) <=> SWR1 Port 3 (COMP_L/R)
++		 * WCD9370 RX Port 4 (LO)      <=> SWR1 Port 4 (LO)
++		 * WCD9370 RX Port 5 (DSD_L/R) <=> SWR1 Port 5 (DSD)
++		 */
++		qcom,rx-port-mapping = <1 2 3 4 5>;
++
++		/*
++		 * Channel mapping in slave port channel order: hph_l, hph_r,
++		 * clsh, comp_l, comp_r, lo, dsd_r, dsd_l.
++		 */
++		qcom,rx-channel-mapping = /bits/ 8 <1 2 1 1 2 1 1 2>;
++	};
++};
++
+ &mdss {
+ 	status = "okay";
+ };
+@@ -516,6 +743,20 @@ ts_rst_n: ts-rst-n-state {
+ 		bias-pull-up;
+ 	};
+ 
++	wcd_reset_default: wcd-reset-default-state {
++		pins = "gpio92";
++		function = "gpio";
++		drive-strength = <16>;
++		bias-disable;
++	};
++
++	spk_amp_default: spk-amp-default-state {
++		pins = "gpio85", "gpio98";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
+ 	ts_i2c_gpio: ts-i2c-gpio-state {
+ 		pins = "gpio6", "gpio7";
+ 		function = "gpio";
+diff --git a/arch/arm64/boot/dts/qcom/sm6115.dtsi b/arch/arm64/boot/dts/qcom/sm6115.dtsi
+index bd94eb87d..f40ac85f5 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6115.dtsi
+@@ -831,6 +831,41 @@ lpass_tlmm: pinctrl@a7c0000 {
+ 			#gpio-cells = <2>;
+ 			gpio-ranges = <&lpass_tlmm 0 0 19>;
+ 
++			lpass_tx_swr_active: lpass-tx-swr-active-state {
++				clk-pins {
++					pins = "gpio0";
++					function = "swr_tx_clk";
++					drive-strength = <10>;
++					slew-rate = <3>;
++					bias-disable;
++				};
++
++				data-pins {
++					pins = "gpio1", "gpio2";
++					function = "swr_tx_data";
++					drive-strength = <10>;
++					slew-rate = <3>;
++					bias-bus-hold;
++				};
++			};
++
++			lpass_rx_swr_active: lpass-rx-swr-active-state {
++				clk-pins {
++					pins = "gpio3";
++					function = "swr_rx_clk";
++					drive-strength = <10>;
++					slew-rate = <3>;
++					bias-disable;
++				};
++
++				data-pins {
++					pins = "gpio4", "gpio5";
++					function = "swr_rx_data";
++					drive-strength = <10>;
++					slew-rate = <3>;
++					bias-bus-hold;
++				};
++			};
+ 		};
+ 
+ 		gcc: clock-controller@1400000 {
+@@ -2704,6 +2739,127 @@ funnel_apss1_in: endpoint {
+ 			};
+ 		};
+ 
++		rxmacro: codec@a600000 {
++			compatible = "qcom,sm6115-lpass-rx-macro";
++			reg = <0x0 0x0a600000 0x0 0x1000>;
++
++			clocks = <&q6afecc LPASS_CLK_ID_RX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_CLK_ID_RX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&vamacro>;
++			clock-names = "mclk",
++				      "npl",
++				      "dcodec",
++				      "fsgen";
++			#clock-cells = <0>;
++			clock-output-names = "mclk";
++			#sound-dai-cells = <1>;
++		};
++
++		swr1: soundwire@a610000 {
++			compatible = "qcom,soundwire-v1.6.0";
++			reg = <0x0 0x0a610000 0x0 0x10000>;
++			interrupts = <GIC_SPI 297 IRQ_TYPE_LEVEL_HIGH>;
++
++			clocks = <&rxmacro>;
++			clock-names = "iface";
++
++			resets = <&lpass_audiocc 0>;
++			reset-names = "swr_audio_cgcr";
++
++			label = "RX";
++			qcom,din-ports = <0>;
++			qcom,dout-ports = <5>;
++
++			qcom,ports-sinterval-low =	/bits/ 8 <0x03 0x1f 0x1f 0x07 0x00>;
++			qcom,ports-offset1 =		/bits/ 8 <0x00 0x00 0x0b 0x01 0x00>;
++			qcom,ports-offset2 =		/bits/ 8 <0x00 0x00 0x0b 0x00 0x00>;
++			qcom,ports-hstart =		/bits/ 8 <0xff 0x03 0xff 0xff 0xff>;
++			qcom,ports-hstop =		/bits/ 8 <0xff 0x06 0xff 0xff 0xff>;
++			qcom,ports-word-length =	/bits/ 8 <0x01 0x07 0x04 0xff 0xff>;
++			qcom,ports-block-pack-mode =	/bits/ 8 <0xff 0x00 0x01 0xff 0xff>;
++			qcom,ports-block-group-count =	/bits/ 8 <0xff 0xff 0xff 0xff 0x00>;
++			qcom,ports-lane-control =	/bits/ 8 <0x01 0x00 0x00 0x00 0x00>;
++
++			#sound-dai-cells = <1>;
++			#address-cells = <2>;
++			#size-cells = <0>;
++		};
++
++		txmacro: codec@a620000 {
++			compatible = "qcom,sm6115-lpass-tx-macro";
++			reg = <0x0 0x0a620000 0x0 0x1000>;
++
++			clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_CLK_ID_TX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&vamacro>;
++			clock-names = "mclk",
++				      "npl",
++				      "dcodec",
++				      "fsgen";
++			#clock-cells = <0>;
++			clock-output-names = "mclk";
++			#sound-dai-cells = <1>;
++		};
++
++		lpass_audiocc: clock-controller@a6a9000 {
++			compatible = "qcom,sm6115-lpassaudiocc";
++			reg = <0x0 0x0a6a9000 0x0 0x1000>;
++			#reset-cells = <1>;
++		};
++
++		vamacro: codec@a730000 {
++			compatible = "qcom,sm6115-lpass-va-macro";
++			reg = <0x0 0x0a730000 0x0 0x1000>;
++
++			clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_CLK_ID_TX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++			clock-names = "mclk",
++				      "dcodec",
++				      "npl";
++			#clock-cells = <0>;
++			clock-output-names = "fsgen";
++			#sound-dai-cells = <1>;
++		};
++
++		swr0: soundwire@a740000 {
++			compatible = "qcom,soundwire-v1.6.0";
++			reg = <0x0 0x0a740000 0x0 0x10000>;
++			interrupts = <GIC_SPI 296 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 79 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&txmacro>;
++			clock-names = "iface";
++
++			resets = <&lpasscc 0>;
++			reset-names = "swr_audio_cgcr";
++
++			label = "VA_TX";
++			qcom,din-ports = <3>;
++			qcom,dout-ports = <0>;
++
++			qcom,ports-sinterval-low =	/bits/ 8 <0x03 0x03 0x03>;
++			qcom,ports-offset1 =		/bits/ 8 <0x01 0x02 0x01>;
++			qcom,ports-offset2 =		/bits/ 8 <0x00 0x00 0x00>;
++			qcom,ports-hstart =		/bits/ 8 <0xff 0xff 0xff>;
++			qcom,ports-hstop =		/bits/ 8 <0xff 0xff 0xff>;
++			qcom,ports-word-length =	/bits/ 8 <0xff 0xff 0xff>;
++			qcom,ports-block-pack-mode =	/bits/ 8 <0xff 0xff 0xff>;
++			qcom,ports-block-group-count =	/bits/ 8 <0xff 0xff 0xff>;
++			qcom,ports-lane-control =	/bits/ 8 <0x00 0x00 0x00>;
++
++			#sound-dai-cells = <1>;
++			#address-cells = <2>;
++			#size-cells = <0>;
++		};
++
++		lpasscc: clock-controller@a7e0000 {
++			compatible = "qcom,sm6115-lpasscc";
++			reg = <0x0 0x0a7e0000 0x0 0x12000>;
++			#reset-cells = <1>;
++		};
++
+ 		remoteproc_adsp: remoteproc@a400000 {
+ 			compatible = "qcom,sm6115-adsp-pas";
+ 			reg = <0x0 0x0a400000 0x0 0x4040>;
+diff --git a/drivers/clk/qcom/lpasscc-sm6115.c b/drivers/clk/qcom/lpasscc-sm6115.c
+index ac6d21923..47adf4de2 100644
+--- a/drivers/clk/qcom/lpasscc-sm6115.c
++++ b/drivers/clk/qcom/lpasscc-sm6115.c
+@@ -35,7 +35,7 @@ static const struct qcom_cc_desc lpass_audiocc_sm6115_reset_desc = {
+ };
+ 
+ static const struct qcom_reset_map lpasscc_sm6115_resets[] = {
+-	[LPASS_SWR_TX_CONFIG_CGCR] = { .reg = 0x100, .bit = 1, .udelay = 500 },
++	[LPASS_SWR_TX_CONFIG_CGCR] = { .reg = 0xc100, .bit = 1, .udelay = 500 },
+ };
+ 
+ static struct regmap_config lpasscc_sm6115_regmap_config = {
+@@ -43,7 +43,7 @@ static struct regmap_config lpasscc_sm6115_regmap_config = {
+ 	.reg_stride = 4,
+ 	.val_bits = 32,
+ 	.name = "lpass-tcsr",
+-	.max_register = 0x1000,
++	.max_register = 0x12000,
+ };
+ 
+ static const struct qcom_cc_desc lpasscc_sm6115_reset_desc = {
+diff --git a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
+index 269c31ce0..31419fa68 100644
+--- a/sound/soc/codecs/Kconfig
++++ b/sound/soc/codecs/Kconfig
+@@ -54,6 +54,7 @@ config SND_SOC_ALL_CODECS
+ 	imply SND_SOC_ALC5632
+ 	imply SND_SOC_AUDIO_IIO_AUX
+ 	imply SND_SOC_AW8738
++	imply SND_SOC_AW87339
+ 	imply SND_SOC_AW87390
+ 	imply SND_SOC_AW88395
+ 	imply SND_SOC_AW88081
+@@ -649,6 +650,14 @@ config SND_SOC_AUDIO_IIO_AUX
+ 	  To compile this driver as a module, choose M here: the module
+ 	  will be called snd-soc-audio-iio-aux.
+ 
++config SND_SOC_AW87339
++	tristate "Awinic AW87339 Speaker Amplifier"
++	depends on I2C
++	select REGMAP_I2C
++	help
++	  Enable support for the Awinic AW87339 class-K speaker amplifier,
++	  using a hardcoded register sequence (no firmware needed).
++
+ config SND_SOC_AW8738
+ 	tristate "Awinic AW8738 Audio Amplifier"
+ 	select GPIOLIB
+diff --git a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
+index 172861d17..606733aff 100644
+--- a/sound/soc/codecs/Makefile
++++ b/sound/soc/codecs/Makefile
+@@ -47,6 +47,7 @@ snd-soc-ak5558-y := ak5558.o
+ snd-soc-arizona-y := arizona.o arizona-jack.o
+ snd-soc-audio-iio-aux-y := audio-iio-aux.o
+ snd-soc-aw8738-y := aw8738.o
++snd-soc-aw87339-y := aw87339.o
+ snd-soc-aw87390-y := aw87390.o
+ snd-soc-aw88081-y := aw88081.o
+ snd-soc-aw88395-lib-y := aw88395/aw88395_lib.o \
+@@ -485,6 +486,7 @@ obj-$(CONFIG_SND_SOC_ALC5632)	+= snd-soc-alc5632.o
+ obj-$(CONFIG_SND_SOC_ARIZONA)	+= snd-soc-arizona.o
+ obj-$(CONFIG_SND_SOC_AUDIO_IIO_AUX)	+= snd-soc-audio-iio-aux.o
+ obj-$(CONFIG_SND_SOC_AW8738)	+= snd-soc-aw8738.o
++obj-$(CONFIG_SND_SOC_AW87339)	+= snd-soc-aw87339.o
+ obj-$(CONFIG_SND_SOC_AW87390)	+= snd-soc-aw87390.o
+ obj-$(CONFIG_SND_SOC_AW88081)	+= snd-soc-aw88081.o
+ obj-$(CONFIG_SND_SOC_AW88395_LIB) += snd-soc-aw88395-lib.o
+diff --git a/sound/soc/codecs/aw87339.c b/sound/soc/codecs/aw87339.c
+new file mode 100644
+index 000000000..714b35c96
+--- /dev/null
++++ b/sound/soc/codecs/aw87339.c
+@@ -0,0 +1,169 @@
++// SPDX-License-Identifier: GPL-2.0-only
++//
++// aw87339.c -- Awinic AW87339 class-K speaker amplifier
++//
++// Minimal driver for devices (F(x)tec Pro1X) where the amplifier is fed by
++// the headphone outputs of a codec.  The vendor kernel loads its register
++// sequences from firmware blobs; they are tiny and identical for the
++// "music" scene on both amplifiers, so they are hardcoded here.  The first
++// register write powers the amplifier down, the last one enables it.
++//
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/regmap.h>
++#include <sound/soc.h>
++
++#define AW87339_REG_CHIPID	0x00
++#define AW87339_REG_SYSCTRL	0x01
++#define AW87339_REG_MAX		0x64
++#define AW87339_CHIPID		0x39
++#define AW87339_PWR_DOWN	0x00
++
++struct aw87339 {
++	struct regmap *regmap;
++	struct gpio_desc *enable;
++	struct mutex lock;
++};
++
++static const struct reg_sequence aw87339_music_seq[] = {
++	{ 0x01, 0x06 },
++	{ 0x02, 0xa3 },
++	{ 0x03, 0x06 },
++	{ 0x04, 0x05 },
++	{ 0x05, 0x0c },	/* gain */
++	{ 0x06, 0x07 },
++	{ 0x07, 0x52 },
++	{ 0x08, 0x03 },
++	{ 0x09, 0x08 },
++	{ 0x0a, 0x96 },
++	{ 0x62, 0x01 },
++	{ 0x63, 0x00 },
++	{ 0x64, 0x00 },
++	{ 0x01, 0x0e },	/* enable */
++};
++
++static const struct regmap_config aw87339_regmap = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = AW87339_REG_MAX,
++};
++
++static int aw87339_event(struct snd_soc_dapm_widget *w,
++			 struct snd_kcontrol *kcontrol, int event)
++{
++	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
++	struct aw87339 *aw = snd_soc_component_get_drvdata(component);
++	int ret = 0;
++
++	mutex_lock(&aw->lock);
++	switch (event) {
++	case SND_SOC_DAPM_PRE_PMU:
++		gpiod_set_value_cansleep(aw->enable, 1);
++		usleep_range(2000, 3000);
++		ret = regmap_multi_reg_write(aw->regmap, aw87339_music_seq,
++					     ARRAY_SIZE(aw87339_music_seq));
++		if (ret)
++			dev_err(component->dev, "enable sequence failed: %d\n", ret);
++		break;
++	case SND_SOC_DAPM_POST_PMD:
++		regmap_write(aw->regmap, AW87339_REG_SYSCTRL, AW87339_PWR_DOWN);
++		gpiod_set_value_cansleep(aw->enable, 0);
++		break;
++	}
++	mutex_unlock(&aw->lock);
++
++	return ret;
++}
++
++static const struct snd_soc_dapm_widget aw87339_dapm_widgets[] = {
++	SND_SOC_DAPM_INPUT("IN"),
++	SND_SOC_DAPM_PGA_E("SPK PA", SND_SOC_NOPM, 0, 0, NULL, 0, aw87339_event,
++			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
++	SND_SOC_DAPM_OUTPUT("OUT"),
++};
++
++static const struct snd_soc_dapm_route aw87339_dapm_routes[] = {
++	{ "SPK PA", NULL, "IN" },
++	{ "OUT", NULL, "SPK PA" },
++};
++
++static const struct snd_soc_component_driver aw87339_component = {
++	.dapm_widgets		= aw87339_dapm_widgets,
++	.num_dapm_widgets	= ARRAY_SIZE(aw87339_dapm_widgets),
++	.dapm_routes		= aw87339_dapm_routes,
++	.num_dapm_routes	= ARRAY_SIZE(aw87339_dapm_routes),
++	.idle_bias_on		= 0,
++	.use_pmdown_time	= 1,
++	.endianness		= 1,
++};
++
++static int aw87339_i2c_probe(struct i2c_client *i2c)
++{
++	struct aw87339 *aw;
++	unsigned int id;
++	int ret;
++
++	aw = devm_kzalloc(&i2c->dev, sizeof(*aw), GFP_KERNEL);
++	if (!aw)
++		return -ENOMEM;
++
++	mutex_init(&aw->lock);
++	i2c_set_clientdata(i2c, aw);
++
++	aw->regmap = devm_regmap_init_i2c(i2c, &aw87339_regmap);
++	if (IS_ERR(aw->regmap))
++		return dev_err_probe(&i2c->dev, PTR_ERR(aw->regmap),
++				     "regmap init failed\n");
++
++	aw->enable = devm_gpiod_get(&i2c->dev, "enable", GPIOD_OUT_HIGH);
++	if (IS_ERR(aw->enable))
++		return dev_err_probe(&i2c->dev, PTR_ERR(aw->enable),
++				     "failed to get enable gpio\n");
++
++	/*
++	 * Check the chip ID, but never fail the probe: this component is an
++	 * auxiliary device of the sound card, so failing here would keep the
++	 * whole card (and the headphones) from ever registering.
++	 */
++	usleep_range(2000, 3000);
++	ret = regmap_read(aw->regmap, AW87339_REG_CHIPID, &id);
++	if (ret)
++		dev_warn(&i2c->dev, "chip ID read failed: %d\n", ret);
++	else if (id != AW87339_CHIPID)
++		dev_warn(&i2c->dev, "unexpected chip ID 0x%02x\n", id);
++	else
++		dev_info(&i2c->dev, "AW87339 found\n");
++
++	regmap_write(aw->regmap, AW87339_REG_SYSCTRL, AW87339_PWR_DOWN);
++	gpiod_set_value_cansleep(aw->enable, 0);
++
++	return devm_snd_soc_register_component(&i2c->dev, &aw87339_component,
++					       NULL, 0);
++}
++
++static const struct i2c_device_id aw87339_i2c_id[] = {
++	{ "aw87339" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, aw87339_i2c_id);
++
++static const struct of_device_id aw87339_of_match[] = {
++	{ .compatible = "awinic,aw87339" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, aw87339_of_match);
++
++static struct i2c_driver aw87339_i2c_driver = {
++	.driver = {
++		.name = "aw87339",
++		.of_match_table = aw87339_of_match,
++	},
++	.probe = aw87339_i2c_probe,
++	.id_table = aw87339_i2c_id,
++};
++module_i2c_driver(aw87339_i2c_driver);
++
++MODULE_DESCRIPTION("Awinic AW87339 speaker amplifier driver");
++MODULE_LICENSE("GPL");
+diff --git a/sound/soc/qcom/sm8250.c b/sound/soc/qcom/sm8250.c
+index f193d0ba6..2c82d4711 100644
+--- a/sound/soc/qcom/sm8250.c
++++ b/sound/soc/qcom/sm8250.c
+@@ -191,6 +191,7 @@ static int sm8250_platform_probe(struct platform_device *pdev)
+ static const struct of_device_id snd_sm8250_dt_match[] = {
+ 	{ .compatible = "fairphone,fp4-sndcard", .data = "sm7225" },
+ 	{ .compatible = "fairphone,fp5-sndcard", .data = "qcm6490" },
++	{ .compatible = "fxtec,pro1x-sndcard", .data = "sm4250" },
+ 	{ .compatible = "qcom,qrb2210-sndcard", .data = "qcm2290" },
+ 	{ .compatible = "qcom,qrb4210-rb2-sndcard", .data = "sm4250" },
+ 	{ .compatible = "qcom,qrb5165-rb5-sndcard", .data = "sm8250" },

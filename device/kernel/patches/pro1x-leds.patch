@@ -1,0 +1,104 @@
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index c19b99224..859ed5084 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -185,6 +185,16 @@ capslock-led {
+ 			linux,default-trigger = "kbd-capslock";
+ 			default-state = "off";
+ 		};
++
++		/* Keyboard backlight: a plain on/off GPIO (no PWM), stock "button-backlight" */
++		kbd-backlight {
++			function = LED_FUNCTION_KBD_BACKLIGHT;
++			color = <LED_COLOR_ID_WHITE>;
++			gpios = <&tlmm 103 GPIO_ACTIVE_HIGH>;
++			default-state = "off";
++			pinctrl-names = "default";
++			pinctrl-0 = <&kbd_backlight_default>;
++		};
+ 	};
+ 
+ 	ts_vdd_supply: ts-vdd-supply {
+@@ -712,6 +722,36 @@ vol_up_n: vol-up-n-state {
+ 	};
+ };
+ 
++&spmi_bus {
++	pmic@3 {
++		/* Camera flash LEDs (torch/flash), two channels on the PMI632 (second SID) */
++		pmi632_flash: led-controller@d300 {
++			compatible = "qcom,pmi8998-flash-led", "qcom,spmi-flash-led";
++			reg = <0xd300>;
++
++			led-0 {
++				function = LED_FUNCTION_FLASH;
++				color = <LED_COLOR_ID_WHITE>;
++				led-sources = <2>;
++				led-max-microamp = <100000>;
++				flash-max-microamp = <1000000>;
++				flash-max-timeout-us = <1280000>;
++				function-enumerator = <0>;
++			};
++
++			led-1 {
++				function = LED_FUNCTION_FLASH;
++				color = <LED_COLOR_ID_AMBER>;
++				led-sources = <1>;
++				led-max-microamp = <100000>;
++				flash-max-microamp = <800000>;
++				flash-max-timeout-us = <1280000>;
++				function-enumerator = <1>;
++			};
++		};
++	};
++};
++
+ &pmi632_lpg {
+ 	status = "okay";
+ 
+@@ -987,6 +1027,13 @@ gpio_kb_pins_extra: gpio-kb-pins-extra {
+ 		bias-pull-up;
+ 	};
+ 
++	kbd_backlight_default: kbd-backlight-default-state {
++		pins = "gpio103";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
+ 	key_camera_n: key-camera-n-state {
+ 		pins = "gpio18";
+ 		function = "gpio";
+diff --git a/drivers/leds/flash/leds-qcom-flash.c b/drivers/leds/flash/leds-qcom-flash.c
+index b03a6833e..3ee145c33 100644
+--- a/drivers/leds/flash/leds-qcom-flash.c
++++ b/drivers/leds/flash/leds-qcom-flash.c
+@@ -23,6 +23,7 @@
+ #define FLASH_SUBTYPE_REG		0x05
+ #define FLASH_SUBTYPE_3CH_PM8150_VAL	0x04
+ #define FLASH_SUBTYPE_3CH_PMI8998_VAL	0x03
++#define FLASH_SUBTYPE_3CH_PMI632_VAL	0x05
+ #define FLASH_SUBTYPE_4CH_VAL		0x07
+ 
+ #define FLASH_STS_3CH_OTST1		BIT(0)
+@@ -885,6 +886,19 @@ static int qcom_flash_led_probe(struct platform_device *pdev)
+ 				    GFP_KERNEL);
+ 		if (!regs)
+ 			return -ENOMEM;
++	} else if (val == FLASH_SUBTYPE_3CH_PMI632_VAL) {
++		/*
++		 * PMI632: same register layout as PM8150, but the flash boost is
++		 * shared with the charger, which the downstream driver tells via a
++		 * "flash active" power-supply property. That handshake is not
++		 * implemented here, so only low-current torch use is expected to work.
++		 */
++		flash_data->hw_type = QCOM_MVFLASH_3CH;
++		flash_data->max_channels = 3;
++		regs = devm_kmemdup(dev, mvflash_3ch_regs, sizeof(mvflash_3ch_regs),
++				    GFP_KERNEL);
++		if (!regs)
++			return -ENOMEM;
+ 	} else if (val == FLASH_SUBTYPE_3CH_PMI8998_VAL) {
+ 		flash_data->hw_type = QCOM_MVFLASH_3CH;
+ 		flash_data->max_channels = 3;

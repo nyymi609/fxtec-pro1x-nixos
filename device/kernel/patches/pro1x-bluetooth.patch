@@ -1,0 +1,118 @@
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index b00822f98..e45b0ceef 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -20,6 +20,11 @@ / {
+ 
+ 	qcom,msm-id = <QCOM_ID_SM6115 0x10000>;
+ 
++	aliases {
++		/* the GENI UART driver needs an alias to pick a port number */
++		serial1 = &uart3;
++	};
++
+ 	chosen {
+ 		#address-cells = <2>;
+ 		#size-cells = <2>;
+@@ -1071,6 +1076,66 @@ &sleep_clk {
+ &tlmm {
+ 	gpio-reserved-ranges = <0 4>, <14 4>;
+ 
++	uart3_default: uart3-default-state {
++		cts-pins {
++			pins = "gpio8";
++			function = "qup3";
++			drive-strength = <2>;
++			bias-bus-hold;
++		};
++
++		rts-pins {
++			pins = "gpio9";
++			function = "qup3";
++			drive-strength = <2>;
++			bias-disable;
++		};
++
++		tx-pins {
++			pins = "gpio10";
++			function = "qup3";
++			drive-strength = <2>;
++			bias-disable;
++		};
++
++		rx-pins {
++			pins = "gpio11";
++			function = "qup3";
++			drive-strength = <2>;
++			bias-pull-up;
++		};
++	};
++
++	uart3_sleep: uart3-sleep-state {
++		cts-pins {
++			pins = "gpio8";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-bus-hold;
++		};
++
++		rts-pins {
++			pins = "gpio9";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-pull-down;
++		};
++
++		tx-pins {
++			pins = "gpio10";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-pull-up;
++		};
++
++		rx-pins {
++			pins = "gpio11";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-pull-up;
++		};
++	};
++
+ 	gpio_kb_pins_extra: gpio-kb-pins-extra {
+ 		pins = "gpio19", "gpio83", "gpio84", "gpio93",
+ 		       "gpio106","gpio112";
+@@ -1232,6 +1297,34 @@ &usb_qmpphy_out {
+ 	remote-endpoint = <&pmi632_ss_in>;
+ };
+ 
++&uart3 {
++	interrupts-extended = <&intc GIC_SPI 330 IRQ_TYPE_LEVEL_HIGH>,
++			      <&tlmm 11 IRQ_TYPE_EDGE_FALLING>;
++	pinctrl-0 = <&uart3_default>;
++	pinctrl-1 = <&uart3_sleep>;
++	pinctrl-names = "default", "sleep";
++
++	status = "okay";
++
++	bluetooth {
++		compatible = "qcom,wcn3950-bt";
++
++		/* same rails the Wi-Fi node uses; no PMU node on this board */
++		vddio-supply = <&pm6125_l9a>;
++		vddxo-supply = <&pm6125_l16a>;
++		vddrf-supply = <&pm6125_l17a>;
++		vddch0-supply = <&pm6125_l23a>;
++		max-speed = <3200000>;
++
++		/*
++		 * The chip has no unique address of its own; without one the kernel
++		 * leaves the controller unconfigured. Locally administered address
++		 * 02:50:31:e8:00:03, written least significant byte first.
++		 */
++		local-bd-address = [03 00 e8 31 50 02];
++	};
++};
++
+ &wifi {
+ 	vdd-0.8-cx-mx-supply = <&pm6125_l8a>;
+ 	vdd-1.8-xo-supply = <&pm6125_l16a>;

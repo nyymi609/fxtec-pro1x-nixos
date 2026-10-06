@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Voice call session, started and stopped by the "Voice Call" UCM verb.
+#   start   start the session in the background
+#   stop    stop it
+#   run     the session itself (foreground)
+#
+pidfile="${XDG_RUNTIME_DIR:-/tmp}/pro1x-voice-call.pid"
+
+case "${1:-run}" in
+start)
+  systemctl --user start pro1x-voicepcm.service 2>/dev/null && exit 0
+  setsid -f pro1x-voice-call run >/dev/null 2>&1
+  exit 0
+  ;;
+stop)
+  systemctl --user stop pro1x-voicepcm.service 2>/dev/null && exit 0
+  [ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null
+  exit 0
+  ;;
+run) ;;
+*)
+  echo "usage: $0 start|stop|run" >&2
+  exit 1
+  ;;
+esac
+
+echo $$ >"$pidfile"
+kp=""
+cur=""
+pick() { pactl list short "$1" | awk -v pat="$2" '$2 ~ pat && $2 !~ /monitor/ { print $2; exit }'; }
+
+start_keepers() {
+  sink=$(pick sinks 'platform-sound.*Voice_Call')
+  src=$(pick sources 'platform-sound.*Voice_Call')
+  cur="$sink $src"
+  [ -n "$sink" ] || return 1
+  echo "keep-alive on $sink / $src"
+  paplay --raw --device="$sink" --rate=48000 --format=s16le --channels=2 /dev/zero &
+  kp="$!"
+  if [ -n "$src" ]; then
+    parec --device="$src" --rate=48000 --format=s16le --channels=1 >/dev/null &
+    kp="$kp $!"
+  fi
+}
+
+stop_keepers() {
+  [ -z "$kp" ] || kill $kp 2>/dev/null
+  kp=""
+}
+
+alive() {
+  [ -n "$kp" ] || return 1
+  for p in $kp; do kill -0 $p 2>/dev/null || return 1; done
+  [ "$cur" = "$(pick sinks 'platform-sound.*Voice_Call') $(pick sources 'platform-sound.*Voice_Call')" ]
+}
+pro1x-voicepcm &
+vp="$!"
+trap 'stop_keepers; kill $vp 2>/dev/null; rm -f "$pidfile"; exit 0' TERM INT
+
+while kill -0 $vp 2>/dev/null; do
+  if ! alive; then
+    stop_keepers
+    sleep 1
+    start_keepers || true
+  fi
+  sleep 1
+done

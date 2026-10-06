@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Run once before the audio server starts. Waits for the sound card, keeps the two
+# front-end routes in place (PipeWire probes every PCM, and a front-end PCM without
+# a routed back end refuses to open) and applies the default gains, which the UCM
+# BootSequence does not apply reliably (HPHR was found at 20, HPHL at 12).
+for _ in $(seq 1 90); do
+  amixer -c0 -q cget name='HPHL Volume' >/dev/null 2>&1 && break
+  sleep 1
+done
+amixer -c0 -q cset name='RX_CODEC_DMA_RX_0 Audio Mixer MultiMedia1' 1 || true
+amixer -c0 -q cset name='MultiMedia2 Mixer VA_CODEC_DMA_TX_0' 1 || true
+for c in HPHL HPHR; do amixer -c0 -q cset name="$c Volume" 12 || true; done
+# Compander off: with it on, the right output is much louder than the left.
+for c in RX_COMP1 RX_COMP2 HPHL_COMP HPHR_COMP; do amixer -c0 -q cset name="$c Switch" 0 || true; done
+exit 0

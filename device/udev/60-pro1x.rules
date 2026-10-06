@@ -1,0 +1,5 @@
+# libcamera's software ISP allocates frame buffers from these dma-buf providers.
+SUBSYSTEM=="dma_heap", GROUP="video", MODE="0660"
+KERNEL=="udmabuf", GROUP="video", MODE="0660"
+# Vibration motor: feedbackd (group feedbackd) drives it.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="aw86224-haptics", ENV{FEEDBACKD_TYPE}="vibra", GROUP="feedbackd", MODE="0660"

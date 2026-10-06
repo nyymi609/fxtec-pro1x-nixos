@@ -1,0 +1,695 @@
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index 33e3ac538..c19b99224 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -56,6 +56,64 @@ disp_vci_supply: disp-vci-supply {
+ 		regulator-name = "disp_vci_supply";
+ 	};
+ 
++
++	gpio-kb-extra-keys {
++		compatible = "gpio-keys";
++		label = "Keyboard extra keys";
++		#address-cells = <1>;
++		#size-cells = <0>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&gpio_kb_pins_extra>;
++
++		key-home {
++			label = "Home";
++			gpios = <&tlmm 93 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_HOMEPAGE>;
++			debounce-interval = <15>;
++			linux,can-disable;
++		};
++
++		key-super-l {
++			label = "Super Left";
++			gpios = <&tlmm 106 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_FN>;
++			debounce-interval = <15>;
++			linux,can-disable;
++		};
++
++		key-super-r {
++			label = "Super Right";
++			gpios = <&tlmm 112 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_FN>;
++			debounce-interval = <15>;
++			linux,can-disable;
++		};
++
++		key-shift {
++			label = "Shift";
++			gpios = <&tlmm 83 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_RIGHTSHIFT>;
++			debounce-interval = <15>;
++			linux,can-disable;
++		};
++
++		key-ctrl {
++			label = "Ctrl";
++			gpios = <&tlmm 84 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_LEFTCTRL>;
++			debounce-interval = <15>;
++			linux,can-disable;
++		};
++
++		key-alt {
++			label = "Alt";
++			gpios = <&tlmm 19 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_LEFTALT>;
++			debounce-interval = <15>;
++			linux,can-disable;
++		};
++	};
++
+ 	gpio-keys {
+ 		compatible = "gpio-keys";
+ 
+@@ -157,7 +215,7 @@ &gpu_zap_shader {
+ };
+ 
+ &i2c1 {
+-	clock-frequency = <100000>;
++	clock-frequency = <400000>;
+ 
+ 	status = "okay";
+ 
+@@ -244,6 +302,22 @@ pca9534: gpio@21 {
+ 		#gpio-cells = <2>;
+ 	};
+ 
++	gpioext0: gpio-expander@5b {
++		/* 8x8 keyboard matrix behind an AW9523B, see pro1x-aw9523-kbd.c */
++		compatible = "fxtec,pro1x-aw9523-keypad";
++		reg = <0x5b>;
++		interrupt-parent = <&tlmm>;
++		interrupts = <107 IRQ_TYPE_LEVEL_LOW>;
++
++		pinctrl-0 = <&gpio_expander_int_n>, <&gpio_expander_rst_n>;
++		pinctrl-names = "default";
++		reset-gpios = <&tlmm 111 GPIO_ACTIVE_HIGH>;
++
++		keypad,num-rows = <8>;
++		keypad,num-columns = <8>;
++		wakeup-source;
++	};
++
+ 	spk_amp0: speaker-amplifier@59 {
+ 		compatible = "awinic,aw87339";
+ 		reg = <0x59>;
+@@ -519,6 +593,75 @@ wcd937x_rx: codec@0,4 {
+ 	};
+ };
+ 
++&gpioext0 {
++	linux,keymap = <
++		MATRIX_KEY(0, 0, KEY_RESERVED)
++		MATRIX_KEY(1, 0, KEY_J)
++		MATRIX_KEY(2, 0, KEY_N)
++		MATRIX_KEY(3, 0, KEY_7)
++		MATRIX_KEY(4, 0, KEY_UP)
++		MATRIX_KEY(5, 0, KEY_ENTER)
++		MATRIX_KEY(6, 0, KEY_U)
++		MATRIX_KEY(7, 0, KEY_DOT)
++		MATRIX_KEY(0, 1, KEY_3)
++		MATRIX_KEY(1, 1, KEY_D)
++		MATRIX_KEY(2, 1, KEY_X)
++		MATRIX_KEY(3, 1, KEY_COMMA)
++		MATRIX_KEY(4, 1, KEY_O)
++		MATRIX_KEY(5, 1, KEY_9)
++		MATRIX_KEY(6, 1, KEY_E)
++		MATRIX_KEY(7, 1, KEY_K)
++		MATRIX_KEY(0, 2, KEY_LEFT)
++		MATRIX_KEY(1, 2, KEY_H)
++		MATRIX_KEY(2, 2, KEY_B)
++		MATRIX_KEY(3, 2, KEY_6)
++		MATRIX_KEY(4, 2, KEY_RIGHT)
++		MATRIX_KEY(5, 2, KEY_DELETE)
++		MATRIX_KEY(6, 2, KEY_Y)
++		MATRIX_KEY(7, 2, KEY_SLASH)
++		MATRIX_KEY(0, 3, KEY_RIGHTALT)
++		MATRIX_KEY(1, 3, KEY_S)
++		MATRIX_KEY(2, 3, KEY_Z)
++		MATRIX_KEY(3, 3, KEY_HOMEPAGE)
++		MATRIX_KEY(4, 3, KEY_LEFTBRACE)
++		MATRIX_KEY(5, 3, KEY_MINUS)
++		MATRIX_KEY(6, 3, KEY_W)
++		MATRIX_KEY(7, 3, KEY_SEMICOLON)
++		MATRIX_KEY(0, 4, KEY_BACKSPACE)
++		MATRIX_KEY(1, 4, KEY_F)
++		MATRIX_KEY(2, 4, KEY_C)
++		MATRIX_KEY(3, 4, KEY_RESERVED)
++		MATRIX_KEY(4, 4, KEY_RIGHTBRACE)
++		MATRIX_KEY(5, 4, KEY_EQUAL)
++		MATRIX_KEY(6, 4, KEY_R)
++		MATRIX_KEY(7, 4, KEY_APOSTROPHE)
++		MATRIX_KEY(0, 5, KEY_CAPSLOCK)
++		MATRIX_KEY(1, 5, KEY_A)
++		MATRIX_KEY(2, 5, KEY_102ND)
++		MATRIX_KEY(3, 5, KEY_DOWN)
++		MATRIX_KEY(4, 5, KEY_P)
++		MATRIX_KEY(5, 5, KEY_0)
++		MATRIX_KEY(6, 5, KEY_Q)
++		MATRIX_KEY(7, 5, KEY_L)
++		MATRIX_KEY(0, 6, KEY_SPACE)
++		MATRIX_KEY(1, 6, KEY_G)
++		MATRIX_KEY(2, 6, KEY_V)
++		MATRIX_KEY(3, 6, KEY_M)
++		MATRIX_KEY(4, 6, KEY_I)
++		MATRIX_KEY(5, 6, KEY_8)
++		MATRIX_KEY(6, 6, KEY_T)
++		MATRIX_KEY(7, 6, KEY_5)
++		MATRIX_KEY(0, 7, KEY_ESC)
++		MATRIX_KEY(1, 7, KEY_1)
++		MATRIX_KEY(2, 7, KEY_RESERVED)
++		MATRIX_KEY(3, 7, KEY_RESERVED)
++		MATRIX_KEY(4, 7, KEY_2)
++		MATRIX_KEY(5, 7, KEY_4)
++		MATRIX_KEY(6, 7, KEY_TAB)
++		MATRIX_KEY(7, 7, KEY_RESERVED)
++	>;
++};
++
+ &mdss {
+ 	status = "okay";
+ };
+@@ -836,6 +979,14 @@ &sleep_clk {
+ &tlmm {
+ 	gpio-reserved-ranges = <0 4>, <14 4>;
+ 
++	gpio_kb_pins_extra: gpio-kb-pins-extra {
++		pins = "gpio19", "gpio83", "gpio84", "gpio93",
++		       "gpio106","gpio112";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++
+ 	key_camera_n: key-camera-n-state {
+ 		pins = "gpio18";
+ 		function = "gpio";
+@@ -925,6 +1076,21 @@ hall_sensor_n: hall-sensor-n-state {
+ 		drive-strength = <2>;
+ 		bias-pull-up;
+ 	};
++
++	gpio_expander_int_n: gpio-exp-intn-def {
++		pins = "gpio107";
++		function = "gpio";
++		drive-strength = <2>;
++		input-enable;
++		bias-pull-up;
++	};
++	gpio_expander_rst_n: gpio-exp-rst-def {
++		pins = "gpio111";
++		function = "gpio";
++		drive-strength = <8>;
++		bias-disable;
++		output-high;
++	};
+ };
+ 
+ &ufs_mem_hc {
+diff --git a/drivers/input/keyboard/Kconfig b/drivers/input/keyboard/Kconfig
+index 9d1019ba0..bf86bf988 100644
+--- a/drivers/input/keyboard/Kconfig
++++ b/drivers/input/keyboard/Kconfig
+@@ -806,4 +806,15 @@ config KEYBOARD_CYPRESS_SF
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called cypress-sf.
+ 
++config KEYBOARD_PRO1X_AW9523
++	tristate "F(x)tec Pro1X AW9523B matrix keyboard"
++	depends on I2C && OF
++	select INPUT_MATRIXKMAP
++	help
++	  Say Y here to enable the hardware keyboard of the F(x)tec Pro1X,
++	  an 8x8 key matrix scanned through an Awinic AW9523B I2C expander.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called pro1x-aw9523-kbd.
++
+ endif
+diff --git a/drivers/input/keyboard/Makefile b/drivers/input/keyboard/Makefile
+index 60bb7baf8..03164fa4e 100644
+--- a/drivers/input/keyboard/Makefile
++++ b/drivers/input/keyboard/Makefile
+@@ -41,6 +41,7 @@ obj-$(CONFIG_KEYBOARD_LOCOMO)		+= locomokbd.o
+ obj-$(CONFIG_KEYBOARD_LPC32XX)		+= lpc32xx-keys.o
+ obj-$(CONFIG_KEYBOARD_MAPLE)		+= maple_keyb.o
+ obj-$(CONFIG_KEYBOARD_MATRIX)		+= matrix_keypad.o
++obj-$(CONFIG_KEYBOARD_PRO1X_AW9523)	+= pro1x-aw9523-kbd.o
+ obj-$(CONFIG_KEYBOARD_MAX7359)		+= max7359_keypad.o
+ obj-$(CONFIG_KEYBOARD_MAX7360)		+= max7360-keypad.o
+ obj-$(CONFIG_KEYBOARD_MPR121)		+= mpr121_touchkey.o
+diff --git a/drivers/input/keyboard/pro1x-aw9523-kbd.c b/drivers/input/keyboard/pro1x-aw9523-kbd.c
+new file mode 100644
+index 000000000..e47fd108f
+--- /dev/null
++++ b/drivers/input/keyboard/pro1x-aw9523-kbd.c
+@@ -0,0 +1,443 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * F(x)tec Pro1X keyboard: 8x8 matrix behind an Awinic AW9523B I2C expander
++ *
++ * The expander drives the matrix (P1 = columns, P0 = rows).  This driver
++ * scans it the way the stock (Android/Droidian) "aw9523b" driver does, which
++ * the generic gpio-matrix-keypad cannot reproduce over a slow I2C expander:
++ *
++ *  - only ONE column is driven (low) at a time and the others float, so a
++ *    pressed key never connects two driven lines and the rows read a clean
++ *    level whatever the contact resistance;
++ *  - a whole row port is read with one transfer;
++ *  - the matrix is scanned twice and a scan is repeated when the two differ;
++ *  - while a key is held the matrix is polled (a held key hides keys on the
++ *    same line when the columns are not scanned);
++ *  - ambiguous ("ghost") key combinations are suppressed.
++ *
++ * Unselected columns are pre-charged high so no stale low from the previous
++ * column can be read as a key press on the next one.
++ *
++ * Device tree:
++ *	compatible = "fxtec,pro1x-aw9523-keypad";
++ *	reg, interrupts (INT, active low), reset-gpios (active high flag,
++ *	pulsed low), keypad,num-rows/columns = <8>, linux,keymap,
++ *	optional: wakeup-source, linux,no-autorepeat,
++ *	optional: fxtec,settle-us (default 20), fxtec,stock-scan (flag)
++ *
++ * The keymap uses MATRIX_KEY(row, col, ...) with row = P0 bit and
++ * col = P1 line.
++ */
++
++#include <linux/delay.h>
++#include <linux/devm-helpers.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/input/matrix_keypad.h>
++#include <linux/interrupt.h>
++#include <linux/log2.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/property.h>
++#include <linux/workqueue.h>
++
++#define AW_INPUT_P0	0x00
++#define AW_INPUT_P1	0x01
++#define AW_OUTPUT_P0	0x02
++#define AW_OUTPUT_P1	0x03
++#define AW_CONFIG_P0	0x04	/* 1 = input */
++#define AW_CONFIG_P1	0x05
++#define AW_INT_P0	0x06	/* 0 = interrupt enabled */
++#define AW_INT_P1	0x07
++#define AW_ID		0x10
++#define AW_ID_VALUE	0x23
++#define AW_SOFT_RESET	0x7f
++
++#define NUM_LINES	8
++#define POLL_MS		15
++#define SCAN_RETRIES	10
++
++static unsigned int settle_us = 20;
++module_param(settle_us, uint, 0644);
++MODULE_PARM_DESC(settle_us, "Delay between driving a column and reading the rows (us)");
++
++static bool stock_scan;
++module_param(stock_scan, bool, 0644);
++MODULE_PARM_DESC(stock_scan, "Scan exactly like the stock driver (no column pre-charge)");
++
++static bool debug_keys;
++module_param(debug_keys, bool, 0644);
++MODULE_PARM_DESC(debug_keys, "Log raw matrix scans (dev_info)");
++
++struct pro1x_kbd {
++	struct i2c_client *client;
++	struct input_dev *input;
++	struct delayed_work work;
++	unsigned short *keycodes;
++	unsigned int row_shift;
++	unsigned int settle;
++	bool stock;
++	bool irq_wake;
++	u8 down[NUM_LINES];	/* per column: rows with a sent key-down */
++};
++
++static int kbd_write(struct pro1x_kbd *kb, u8 reg, u8 val)
++{
++	return i2c_smbus_write_byte_data(kb->client, reg, val);
++}
++
++static int kbd_read(struct pro1x_kbd *kb, u8 reg)
++{
++	return i2c_smbus_read_byte_data(kb->client, reg);
++}
++
++/* All columns driven low: any key pulls its row low and raises INT. */
++static int kbd_idle_config(struct pro1x_kbd *kb)
++{
++	int ret;
++
++	ret = kbd_write(kb, AW_OUTPUT_P1, 0x00);
++	if (!ret)
++		ret = kbd_write(kb, AW_CONFIG_P1, 0x00);
++	return ret;
++}
++
++/*
++ * Scan once. state[col] gets a bitmask of the rows that read low with that
++ * column selected.
++ */
++static int kbd_scan_once(struct pro1x_kbd *kb, u8 state[NUM_LINES])
++{
++	int col, val, ret;
++
++	if (!kb->stock) {
++		/* Start with every column driven high. */
++		ret = kbd_write(kb, AW_OUTPUT_P1, 0xff);
++		if (!ret)
++			ret = kbd_write(kb, AW_CONFIG_P1, 0x00);
++		if (ret)
++			return ret;
++	}
++
++	for (col = 0; col < NUM_LINES; col++) {
++		if (kb->stock) {
++			/* Latch is low (idle config); only the direction changes. */
++			ret = kbd_write(kb, AW_CONFIG_P1, (u8)~BIT(col));
++		} else {
++			/*
++			 * Previous column back to high (it is the only output),
++			 * the next column becomes an output (still high), then
++			 * goes low. The others float at their pre-charged level.
++			 */
++			ret = kbd_write(kb, AW_OUTPUT_P1, 0xff);
++			if (!ret)
++				ret = kbd_write(kb, AW_CONFIG_P1, (u8)~BIT(col));
++			if (!ret)
++				ret = kbd_write(kb, AW_OUTPUT_P1, (u8)~BIT(col));
++		}
++		if (ret)
++			return ret;
++
++		if (kb->settle)
++			usleep_range(kb->settle, kb->settle + 20);
++
++		val = kbd_read(kb, AW_INPUT_P0);
++		if (val < 0)
++			return val;
++
++		state[col] = (u8)~val;
++	}
++
++	return 0;
++}
++
++/* Scan twice and repeat if the matrix changed in between. */
++static int kbd_scan(struct pro1x_kbd *kb, u8 state[NUM_LINES])
++{
++	u8 again[NUM_LINES];
++	int i, ret;
++
++	if (kb->stock) {
++		ret = kbd_write(kb, AW_OUTPUT_P1, 0x00);
++		if (ret)
++			return ret;
++	}
++
++	for (i = 0; i < SCAN_RETRIES; i++) {
++		ret = kbd_scan_once(kb, state);
++		if (ret)
++			return ret;
++		ret = kbd_scan_once(kb, again);
++		if (ret)
++			return ret;
++		if (!memcmp(state, again, NUM_LINES))
++			break;
++		usleep_range(500, 1000);
++	}
++
++	memcpy(state, again, NUM_LINES);
++	return 0;
++}
++
++static bool kbd_is_ghost(const u8 state[NUM_LINES], int col, int row)
++{
++	int k;
++
++	/*
++	 * A key at (col,row) is ambiguous when another column also has this
++	 * row pressed and that column shares a second row with this column
++	 * (the four corners of a rectangle are down).
++	 */
++	for (k = 0; k < NUM_LINES; k++)
++		if (k != col && (state[k] & BIT(row)) &&
++		    ((state[col] & state[k]) & ~BIT(row)))
++			return true;
++	return false;
++}
++
++static void kbd_report(struct pro1x_kbd *kb, const u8 state[NUM_LINES])
++{
++	int col, row;
++	bool changed = false;
++
++	for (col = 0; col < NUM_LINES; col++) {
++		for (row = 0; row < NUM_LINES; row++) {
++			unsigned int code = MATRIX_SCAN_CODE(row, col, kb->row_shift);
++			bool pressed = state[col] & BIT(row);
++			bool is_down = kb->down[col] & BIT(row);
++
++			if (pressed && !is_down) {
++				if (kbd_is_ghost(state, col, row))
++					continue;
++				kb->down[col] |= BIT(row);
++			} else if (!pressed && is_down) {
++				kb->down[col] &= ~BIT(row);
++			} else {
++				continue;
++			}
++
++			changed = true;
++			input_event(kb->input, EV_MSC, MSC_SCAN, code);
++			input_report_key(kb->input, kb->keycodes[code], pressed);
++		}
++	}
++
++	if (changed)
++		input_sync(kb->input);
++}
++
++static void pro1x_kbd_work(struct work_struct *work)
++{
++	struct pro1x_kbd *kb = container_of(work, struct pro1x_kbd, work.work);
++	struct device *dev = &kb->client->dev;
++	u8 state[NUM_LINES];
++	u8 keymask = 0;
++	int i, ret;
++
++	ret = kbd_scan(kb, state);
++	if (ret) {
++		dev_err_ratelimited(dev, "matrix scan failed: %d\n", ret);
++		memset(state, 0, sizeof(state));
++	} else {
++		for (i = 0; i < NUM_LINES; i++)
++			keymask |= state[i];
++
++		if (debug_keys && keymask)
++			dev_info(dev, "scan %*phN\n", NUM_LINES, state);
++
++		kbd_report(kb, state);
++	}
++
++	/* Back to the idle configuration and clear the pending INT. */
++	if (kbd_idle_config(kb))
++		dev_err_ratelimited(dev, "failed to restore idle config\n");
++	kbd_read(kb, AW_INPUT_P0);
++	kbd_read(kb, AW_INPUT_P1);
++
++	if (keymask) {
++		/* Poll while a key is held, the IRQ stays masked. */
++		schedule_delayed_work(&kb->work, msecs_to_jiffies(POLL_MS));
++		return;
++	}
++
++	/* The level triggered INT re-fires if anything changed since the read. */
++	enable_irq(kb->client->irq);
++}
++
++static irqreturn_t pro1x_kbd_irq(int irq, void *data)
++{
++	struct pro1x_kbd *kb = data;
++
++	disable_irq_nosync(irq);
++	schedule_delayed_work(&kb->work, 0);
++
++	return IRQ_HANDLED;
++}
++
++static int pro1x_kbd_hw_init(struct pro1x_kbd *kb)
++{
++	int id, ret;
++
++	id = kbd_read(kb, AW_ID);
++	if (id < 0)
++		return id;
++	if (id != AW_ID_VALUE) {
++		dev_err(&kb->client->dev, "unexpected chip id 0x%02x\n", id);
++		return -ENODEV;
++	}
++
++	ret = kbd_write(kb, AW_SOFT_RESET, 0x00);
++	if (ret)
++		return ret;
++	usleep_range(1000, 2000);
++
++	/* P0: inputs (rows) with interrupts, P1: outputs (columns), no INT. */
++	ret = kbd_write(kb, AW_CONFIG_P0, 0xff);
++	if (!ret)
++		ret = kbd_write(kb, AW_INT_P0, 0x00);
++	if (!ret)
++		ret = kbd_write(kb, AW_INT_P1, 0xff);
++	if (!ret)
++		ret = kbd_idle_config(kb);
++	if (ret)
++		return ret;
++
++	kbd_read(kb, AW_INPUT_P0);
++	kbd_read(kb, AW_INPUT_P1);
++
++	return 0;
++}
++
++static int pro1x_kbd_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct gpio_desc *reset;
++	struct pro1x_kbd *kb;
++	struct input_dev *input;
++	unsigned int rows, cols;
++	u32 val;
++	int ret;
++
++	if (!client->irq)
++		return dev_err_probe(dev, -EINVAL, "no interrupt\n");
++
++	kb = devm_kzalloc(dev, sizeof(*kb), GFP_KERNEL);
++	if (!kb)
++		return -ENOMEM;
++
++	kb->client = client;
++	kb->settle = settle_us;
++	if (!device_property_read_u32(dev, "fxtec,settle-us", &val))
++		kb->settle = val;
++	kb->stock = stock_scan || device_property_read_bool(dev, "fxtec,stock-scan");
++
++	ret = matrix_keypad_parse_properties(dev, &rows, &cols);
++	if (ret)
++		return ret;
++	if (rows != NUM_LINES || cols != NUM_LINES)
++		return dev_err_probe(dev, -EINVAL, "need an 8x8 matrix\n");
++
++	reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(reset))
++		return dev_err_probe(dev, PTR_ERR(reset), "reset gpio\n");
++	if (reset) {
++		/* The flag in DT is active-high: 0 is the reset level (pin low). */
++		gpiod_set_value_cansleep(reset, 0);
++		usleep_range(1000, 2000);
++		gpiod_set_value_cansleep(reset, 1);
++		usleep_range(5000, 10000);
++	}
++
++	input = devm_input_allocate_device(dev);
++	if (!input)
++		return -ENOMEM;
++
++	input->name = "Pro1X keyboard";
++	input->phys = "pro1x-aw9523/input0";
++	input->id.bustype = BUS_I2C;
++	input->id.vendor = 0x0001;
++	input->id.product = 0x0001;
++	input->id.version = 0x0100;
++
++	ret = matrix_keypad_build_keymap(NULL, NULL, rows, cols, NULL, input);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to build keymap\n");
++
++	if (!device_property_read_bool(dev, "linux,no-autorepeat"))
++		__set_bit(EV_REP, input->evbit);
++	input_set_capability(input, EV_MSC, MSC_SCAN);
++
++	kb->input = input;
++	kb->keycodes = input->keycode;
++	kb->row_shift = get_count_order(cols);
++	i2c_set_clientdata(client, kb);
++
++	ret = devm_delayed_work_autocancel(dev, &kb->work, pro1x_kbd_work);
++	if (ret)
++		return ret;
++
++	ret = pro1x_kbd_hw_init(kb);
++	if (ret)
++		return dev_err_probe(dev, ret, "expander init failed\n");
++
++	ret = input_register_device(input);
++	if (ret)
++		return ret;
++
++	ret = devm_request_irq(dev, client->irq, pro1x_kbd_irq,
++			       IRQF_NO_AUTOEN, "pro1x-kbd", kb);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to request IRQ\n");
++
++	device_init_wakeup(dev, device_property_read_bool(dev, "wakeup-source"));
++
++	enable_irq(client->irq);
++
++	dev_info(dev, "Pro1X keyboard ready (%s scan, settle %u us)\n",
++		 kb->stock ? "stock" : "pre-charged", kb->settle);
++	return 0;
++}
++
++static int pro1x_kbd_suspend(struct device *dev)
++{
++	struct pro1x_kbd *kb = dev_get_drvdata(dev);
++
++	if (device_may_wakeup(dev) && !enable_irq_wake(kb->client->irq))
++		kb->irq_wake = true;
++
++	return 0;
++}
++
++static int pro1x_kbd_resume(struct device *dev)
++{
++	struct pro1x_kbd *kb = dev_get_drvdata(dev);
++
++	if (kb->irq_wake) {
++		disable_irq_wake(kb->client->irq);
++		kb->irq_wake = false;
++	}
++
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(pro1x_kbd_pm, pro1x_kbd_suspend, pro1x_kbd_resume);
++
++static const struct of_device_id pro1x_kbd_of_match[] = {
++	{ .compatible = "fxtec,pro1x-aw9523-keypad" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, pro1x_kbd_of_match);
++
++static struct i2c_driver pro1x_kbd_driver = {
++	.driver = {
++		.name = "pro1x-aw9523-kbd",
++		.of_match_table = pro1x_kbd_of_match,
++		.pm = pm_sleep_ptr(&pro1x_kbd_pm),
++	},
++	.probe = pro1x_kbd_probe,
++};
++module_i2c_driver(pro1x_kbd_driver);
++
++MODULE_DESCRIPTION("F(x)tec Pro1X AW9523B matrix keyboard driver");
++MODULE_LICENSE("GPL");
