@@ -52,10 +52,10 @@ index 415fc4e29..d51e4dbdd 100644
  obj-$(CONFIG_INPUT_BMA150)		+= bma150.o
 diff --git a/drivers/input/misc/aw86224.c b/drivers/input/misc/aw86224.c
 new file mode 100644
-index 000000000..4a2c5b419
+index 0000000..fdae931
 --- /dev/null
 +++ b/drivers/input/misc/aw86224.c
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,298 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Awinic AW86224/AW86225 LRA haptic driver (minimal, continuous mode only).
@@ -120,9 +120,29 @@ index 000000000..4a2c5b419
 +#define AW_ANACFG8_HDRV_MASK	GENMASK(7, 6)
 +#define AW_D2S_GAIN_MASK	GENMASK(2, 0)
 +
-+/* Values from the stock Pro1X device tree */
++/*
++ * Drive levels at full strength. 0x7f/0x3b are the stock Pro1X device tree values
++ * (start-up level / sustained level, 7 bit each); the sustained level is what you
++ * feel in a long buzz. All three knobs can be changed at runtime and apply from the
++ * next effect:
++ *   echo 80 > /sys/module/aw86224/parameters/drv2_lvl
++ */
 +#define DRV1_LVL_MAX		0x7f
 +#define DRV2_LVL_MAX		0x3b
++#define D2S_GAIN_STOCK		5
++#define D2S_GAIN_DEFAULT	6
++
++static unsigned int drv1_lvl = DRV1_LVL_MAX;
++module_param(drv1_lvl, uint, 0644);
++MODULE_PARM_DESC(drv1_lvl, "Start-up drive level at full strength (0-127)");
++
++static unsigned int drv2_lvl = DRV2_LVL_MAX;
++module_param(drv2_lvl, uint, 0644);
++MODULE_PARM_DESC(drv2_lvl, "Sustained drive level at full strength (0-127, stock 59). Higher is stronger and warms the motor more");
++
++static unsigned int d2s_gain = D2S_GAIN_DEFAULT;
++module_param(d2s_gain, uint, 0644);
++MODULE_PARM_DESC(d2s_gain, "Output gain code 0-7 = x1, x2, x4, x5, x8, x10, x20, x40 (stock 5)");
 +
 +struct aw86224 {
 +	struct i2c_client *client;
@@ -194,7 +214,7 @@ index 000000000..4a2c5b419
 +			   FIELD_PREP(AW_TRGCFG8_TRIG_MASK, AW_TRGCFG8_DISABLE));
 +	regmap_update_bits(r, AW_REG_ANACFG8, AW_ANACFG8_HDRV_MASK,
 +			   AW_ANACFG8_HDRV_MASK);
-+	regmap_update_bits(r, AW_REG_SYSCTRL7, AW_D2S_GAIN_MASK, 5);
++	regmap_update_bits(r, AW_REG_SYSCTRL7, AW_D2S_GAIN_MASK, D2S_GAIN_STOCK);
 +	regmap_write(r, AW_REG_CONTCFG13, (6 << 4) | 2);	/* tset, bemf */
 +	regmap_write(r, AW_REG_CONTCFG10, 6);			/* brake time */
 +	regmap_update_bits(r, AW_REG_CONTCFG5, 0x0f, 8);	/* brake gain */
@@ -232,9 +252,10 @@ index 000000000..4a2c5b419
 +		return;
 +	}
 +
-+	d1 = max(1u, DIV_ROUND_UP(mag * DRV1_LVL_MAX, 0xffff));
-+	d2 = max(1u, DIV_ROUND_UP(mag * DRV2_LVL_MAX, 0xffff));
++	d1 = max(1u, DIV_ROUND_UP(mag * min(drv1_lvl, 0x7fu), 0xffff));
++	d2 = max(1u, DIV_ROUND_UP(mag * min(drv2_lvl, 0x7fu), 0xffff));
 +
++	regmap_update_bits(r, AW_REG_SYSCTRL7, AW_D2S_GAIN_MASK, min(d2s_gain, 7u));
 +	regmap_update_bits(r, AW_REG_PLAYCFG3, AW_PLAY_MODE_MASK, AW_PLAY_MODE_CONT);
 +	regmap_write(r, AW_REG_CONTCFG6, AW_TRACK_EN | d1);
 +	regmap_write(r, AW_REG_CONTCFG7, d2);

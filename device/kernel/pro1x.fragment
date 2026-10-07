@@ -166,3 +166,29 @@ CONFIG_VIDEO_DW9800=m
 CONFIG_UDMABUF=y
 CONFIG_DMABUF_HEAPS=y
 CONFIG_DMABUF_HEAPS_SYSTEM=y
+
+# Waydroid (Android container, LXC): binder + binderfs built in (they cannot be
+# modules), pressure stall info for Android's lmkd, policy routing for netd, and the
+# netfilter/tc pieces netd and waydroid-net.sh use. ashmem no longer exists upstream;
+# current Waydroid images use memfd. Namespaces, cgroups, veth, bridge, nftables and
+# uinput are already on.
+CONFIG_ANDROID_BINDER_IPC=y
+CONFIG_ANDROID_BINDERFS=y
+CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"
+CONFIG_PSI=y
+CONFIG_IP_ADVANCED_ROUTER=y
+CONFIG_IP_MULTIPLE_TABLES=y
+CONFIG_IPV6_MULTIPLE_TABLES=y
+CONFIG_INET_UDP_DIAG=y
+CONFIG_NF_CT_NETLINK=m
+CONFIG_NETFILTER_XT_TARGET_CHECKSUM=m
+CONFIG_NETFILTER_XT_TARGET_TCPMSS=m
+CONFIG_NETFILTER_XT_TARGET_CT=m
+CONFIG_NETFILTER_XT_MATCH_OWNER=m
+CONFIG_NETFILTER_XT_MATCH_MARK=m
+CONFIG_NETFILTER_XT_MATCH_LIMIT=m
+CONFIG_NETFILTER_XT_MATCH_QUOTA=m
+CONFIG_NETFILTER_XT_MATCH_SOCKET=m
+CONFIG_NET_SCH_HTB=m
+CONFIG_NET_CLS_U32=m
+CONFIG_NET_ACT_POLICE=m
