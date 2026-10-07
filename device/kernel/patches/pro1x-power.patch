@@ -2,7 +2,7 @@ diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/d
 index 859ed5084..871a198e8 100644
 --- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
 +++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
-@@ -197,6 +197,44 @@ kbd-backlight {
+@@ -197,6 +197,35 @@ kbd-backlight {
  		};
  	};
  
@@ -35,19 +35,10 @@ index 859ed5084..871a198e8 100644
 +				<3400700 3>, <3385000 2>, <3380000 1>, <3360000 0>;
 +	};
 +
-+	/* No mainline charger/gauge driver: estimate the level from the ADC. */
-+	battery-monitor {
-+		compatible = "fxtec,pro1x-adc-battery";
-+		io-channels = <&pmi632_adc ADC5_VBAT_SNS>,
-+			      <&pmi632_adc ADC5_USB_IN_V_16>;
-+		io-channel-names = "vbat", "usbin";
-+		monitored-battery = <&battery>;
-+	};
-+
  	ts_vdd_supply: ts-vdd-supply {
  		compatible = "regulator-fixed";
  		regulator-name = "ts_vdd_supply";
-@@ -723,6 +761,14 @@ vol_up_n: vol-up-n-state {
+@@ -723,6 +752,27 @@ vol_up_n: vol-up-n-state {
  };
  
  &spmi_bus {
@@ -56,6 +47,19 @@ index 859ed5084..871a198e8 100644
 +		pmi632_charger: charger@1000 {
 +			compatible = "fxtec,pro1x-charger-icl";
 +			reg = <0x1000>;
++		};
++
++		/*
++		 * Battery level: the PMI632 fuel gauge (QG) still measures the battery
++		 * current; with the ADC voltage that gives the open-circuit voltage.
++		 */
++		pmi632_gauge: fuel-gauge@4800 {
++			compatible = "fxtec,pro1x-adc-battery";
++			reg = <0x4800>;
++			io-channels = <&pmi632_adc ADC5_VBAT_SNS>,
++				      <&pmi632_adc ADC5_USB_IN_V_16>;
++			io-channel-names = "vbat", "usbin";
++			monitored-battery = <&battery>;
 +		};
 +	};
 +
@@ -66,7 +70,7 @@ diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
 index 83392ed6a..d2ac80e73 100644
 --- a/drivers/power/supply/Kconfig
 +++ b/drivers/power/supply/Kconfig
-@@ -38,6 +38,23 @@ config APM_POWER
+@@ -38,6 +38,24 @@ config APM_POWER
  config ADC_BATTERY_HELPER
  	tristate
  
@@ -79,11 +83,12 @@ index 83392ed6a..d2ac80e73 100644
 +	  is no other mainline driver for this charger.
 +
 +config BATTERY_PRO1X_ADC
-+	tristate "Voltage-based battery estimate from PMIC ADC (F(x)tec Pro1X)"
-+	depends on IIO && OF
++	tristate "Battery level from PMIC ADC and gauge current (F(x)tec Pro1X)"
++	depends on IIO && OF && REGMAP
 +	help
 +	  Reports a battery state of charge estimated from the battery
-+	  voltage read through IIO and the open-circuit-voltage table of the
++	  voltage (read through IIO), the battery current (read from the
++	  PMI632 fuel gauge block) and the open-circuit-voltage table of the
 +	  monitored simple-battery node. For boards without a fuel gauge
 +	  driver.
 +
@@ -108,36 +113,76 @@ new file mode 100644
 index 000000000..e7eada49d
 --- /dev/null
 +++ b/drivers/power/supply/pro1x-adc-battery.c
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,454 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * Voltage-only battery estimate from PMIC ADC channels.
++ * Battery state of charge for the F(x)tec Pro1X (PMI632).
 + *
-+ * For boards without a mainline fuel gauge / charger driver (F(x)tec Pro1X: the
-+ * PMI632 "smb5" charger and "QG" gauge). Reads the battery voltage and the USB
-+ * input voltage through IIO, derives the state of charge from the open-circuit
-+ * voltage table of the monitored simple-battery node, and reports charging /
-+ * discharging / full from the USB input voltage. It is an estimate: the voltage
-+ * sags under load and rises while charging, so a fixed offset can be applied
-+ * while a charger is present.
++ * There is no mainline driver for the PMI632 "QG" fuel gauge. The gauge hardware
++ * still measures: this driver reads the battery CURRENT from it (burst-averaged,
++ * same registers and scale factors as the downstream qpnp-qg driver) and the
++ * battery voltage through the PMIC ADC (IIO), and derives the open-circuit voltage
++ *
++ *	OCV = V + I * ESR		(I positive while discharging)
++ *
++ * which is looked up in the ocv-capacity table of the monitored simple-battery
++ * node. Without the current compensation the voltage sag under load (about 0.1 V
++ * at 0.5 A on a worn cell) reads as lost capacity that comes back when the load
++ * goes away. The ESR is learned at run time from how the voltage follows the
++ * current (esr_learn) and can be set by hand (esr_mohm).
++ *
++ * The reported percentage only moves in the direction of the energy flow: down
++ * while discharging, up while charging. A slow correction against it is allowed
++ * when the estimate stays far away.
 + */
 +#include <linux/delay.h>
 +#include <linux/devm-helpers.h>
 +#include <linux/iio/consumer.h>
++#include <linux/math64.h>
 +#include <linux/module.h>
 +#include <linux/mutex.h>
 +#include <linux/of.h>
 +#include <linux/platform_device.h>
 +#include <linux/power_supply.h>
 +#include <linux/property.h>
++#include <linux/regmap.h>
++#include <linux/unaligned.h>
 +
-+#define POLL_MS			30000
++#define POLL_MS			5000
++#define STEP_POLLS		2	/* capacity moves 1 % per 10 s at most */
++#define CORRECT_POLLS		12	/* ... and 1 % per minute against the energy flow */
++#define CORRECT_MIN_DELTA	5	/* only when the estimate is this far off (%) */
++#define LEARN_POLLS		6
++#define WIN			24	/* regression window: 2 minutes of samples */
 +
-+/* Voltage rise (uV) attributed to the charge current while a charger is in; tunable live. */
-+static unsigned int charge_offset_uv = 40000;
-+module_param(charge_offset_uv, uint, 0644);
-+MODULE_PARM_DESC(charge_offset_uv, "Subtracted from the battery voltage while USB is present (uV)");
++/* Gauge registers, offsets from the node's reg (0x4800 on PMI632) */
++#define QG_PERPH_SUBTYPE	0x05
++#define QG_SUBTYPE_IBAT_5A	0x03
++#define QG_DATA_CTL2		0x42
++#define BURST_AVG_HOLD_FOR_READ	BIT(0)
++#define QG_LAST_BURST_AVG_I	0xc6
++#define QG_I_RESET		0x8000
++
++#define IRAW_NA_5A		152588	/* nA per LSB, 5 A current ADC */
++#define IRAW_NA_10A		305176
++
 +#define USB_PRESENT_UV		4000000
++#define CHARGING_MIN_UA		30000	/* net current into the battery to count as charging */
++#define ESR_MIN_MOHM		50
++#define ESR_MAX_MOHM		400
++
++/* Internal resistance in milliohm. Starts here, updated by the learning unless disabled. */
++static unsigned int esr_mohm = 150;
++module_param(esr_mohm, uint, 0644);
++MODULE_PARM_DESC(esr_mohm, "Battery internal resistance used for the load compensation (mOhm)");
++
++static bool esr_learn = true;
++module_param(esr_learn, bool, 0644);
++MODULE_PARM_DESC(esr_learn, "Learn esr_mohm from voltage vs current (set 0 to keep a hand-set value)");
++
++static bool debug;
++module_param(debug, bool, 0644);
++MODULE_PARM_DESC(debug, "Log every poll: voltage, current, ESR, OCV, estimate");
 +
 +struct adc_battery {
 +	struct device *dev;
@@ -145,11 +190,23 @@ index 000000000..e7eada49d
 +	struct power_supply_battery_info *info;
 +	struct iio_channel *vbat;
 +	struct iio_channel *usbin;
++	struct regmap *map;
++	u32 base;
++	s64 i_scale_na;
 +	struct delayed_work work;
 +	struct mutex lock;
 +	u32 full_uv;
-+	int cap;		/* cached, slew-limited estimate (%) */
++
++	/* filtered values, positive current = discharging */
++	bool filt_valid;
++	int v_f, i_f;
++	int ocv_uv;
++	int win_v[WIN], win_i[WIN];	/* mV, mA */
++	int win_n, win_pos;
++
++	int cap;		/* reported estimate (%), -1 until the first sample */
 +	int status;
++	unsigned int ticks;
 +};
 +
 +/* IIO "processed" values of the SPMI ADC are in micro-units for voltages. */
@@ -163,9 +220,9 @@ index 000000000..e7eada49d
 +#define BURST		8
 +#define BURST_PICK	5	/* of 8, ascending: ignores the lowest (sagging) samples */
 +
-+static int adc_battery_sample(struct adc_battery *b, int *vbat, bool *usb)
++static int adc_battery_read_vbat(struct adc_battery *b, int *vbat)
 +{
-+	int v[BURST], usbin, ret, i, j, t;
++	int v[BURST], ret, i, j, t;
 +
 +	for (i = 0; i < BURST; i++) {
 +		ret = adc_read_uv(b->vbat, &v[i]);
@@ -180,13 +237,78 @@ index 000000000..e7eada49d
 +			t = v[j]; v[j] = v[j - 1]; v[j - 1] = t;
 +		}
 +	*vbat = v[BURST_PICK];
++	return 0;
++}
++
++/* Battery current in uA from the gauge, positive while discharging. */
++static int adc_battery_read_ibat(struct adc_battery *b, int *ibat_ua)
++{
++	u8 raw[2];
++	int ret, ret2;
++	u16 u;
++
++	/* Freeze the burst average while both bytes are read (as downstream does). */
++	ret = regmap_update_bits(b->map, b->base + QG_DATA_CTL2,
++				 BURST_AVG_HOLD_FOR_READ, BURST_AVG_HOLD_FOR_READ);
++	if (ret)
++		return ret;
++	ret = regmap_bulk_read(b->map, b->base + QG_LAST_BURST_AVG_I, raw, sizeof(raw));
++	ret2 = regmap_update_bits(b->map, b->base + QG_DATA_CTL2, BURST_AVG_HOLD_FOR_READ, 0);
++	if (ret)
++		return ret;
++	if (ret2)
++		return ret2;
++
++	u = get_unaligned_le16(raw);
++	if (u == QG_I_RESET)	/* FIFO reset value: no valid sample yet */
++		return -EAGAIN;
++	*ibat_ua = div_s64((s64)(s16)u * b->i_scale_na, 1000);
++	return 0;
++}
++
++static int adc_battery_read_usb(struct adc_battery *b, bool *usb)
++{
++	int usbin, ret;
 +
 +	ret = adc_read_uv(b->usbin, &usbin);
 +	if (ret)
 +		return ret;
-+
 +	*usb = usbin > USB_PRESENT_UV;
 +	return 0;
++}
++
++/* Learn the internal resistance: the voltage falls by ESR per ampere of extra current. */
++static void adc_battery_learn_esr(struct adc_battery *b)
++{
++	s64 vm = 0, im = 0, cov = 0, var = 0, r;
++	int i;
++
++	if (!esr_learn || b->win_n < WIN)
++		return;
++
++	for (i = 0; i < WIN; i++) {
++		vm += b->win_v[i];
++		im += b->win_i[i];
++	}
++	vm = div_s64(vm, WIN);
++	im = div_s64(im, WIN);
++	for (i = 0; i < WIN; i++) {
++		s64 dv = b->win_v[i] - vm, di = b->win_i[i] - im;
++
++		cov += dv * di;
++		var += di * di;
++	}
++	/* Needs a real spread of the current (std deviation >= 150 mA), else it is noise. */
++	if (var < (s64)WIN * 150 * 150 || cov >= 0)
++		return;
++
++	r = div64_s64(-cov * 1000, var);	/* mV/mA = ohm, *1000 = mOhm */
++	if (r < ESR_MIN_MOHM || r > ESR_MAX_MOHM)
++		return;
++
++	esr_mohm = (esr_mohm * 3 + (unsigned int)r) / 4;
++	if (debug)
++		dev_info(b->dev, "esr sample %lld mOhm -> %u mOhm\n", r, esr_mohm);
 +}
 +
 +static int adc_battery_status(struct adc_battery *b, int vbat, bool usb)
@@ -198,45 +320,76 @@ index 000000000..e7eada49d
 +	return POWER_SUPPLY_STATUS_CHARGING;
 +}
 +
-+/* Raw estimate from one sample; b->lock held by callers that update b->cap. */
-+static int adc_battery_estimate(struct adc_battery *b, int vbat, bool usb)
++/* Returns true when the reported capacity or status changed. */
++static bool adc_battery_update(struct adc_battery *b)
 +{
-+	int ocv = vbat, cap;
++	int vbat, ibat, est, ocv, old_cap, old_status, delta;
++	bool changed;
++	bool usb, charging;
 +
-+	if (usb && ocv > (int)charge_offset_uv)
-+		ocv -= charge_offset_uv;
-+
-+	cap = power_supply_batinfo_ocv2cap(b->info, ocv, 25);
-+	if (cap < 0)
-+		return cap;
-+	cap = clamp(cap, 0, 100);
-+
-+	if (usb && vbat >= b->full_uv)
-+		cap = 100;
-+	return cap;
-+}
-+
-+/* Move the cached value towards the estimate by at most 1 % per update. */
-+static void adc_battery_update(struct adc_battery *b)
-+{
-+	bool usb;
-+	int vbat, est;
-+
-+	if (adc_battery_sample(b, &vbat, &usb))
-+		return;
-+	est = adc_battery_estimate(b, vbat, usb);
-+	if (est < 0)
-+		return;
++	if (adc_battery_read_vbat(b, &vbat) || adc_battery_read_usb(b, &usb))
++		return false;
++	if (adc_battery_read_ibat(b, &ibat))
++		return false;
 +
 +	mutex_lock(&b->lock);
-+	if (b->cap < 0 || est == 100 || est == 0)
++	old_cap = b->cap;
++	old_status = b->status;
++
++	if (!b->filt_valid) {
++		b->v_f = vbat;
++		b->i_f = ibat;
++		b->filt_valid = true;
++	} else {
++		b->v_f += (vbat - b->v_f) / 3;
++		b->i_f += (ibat - b->i_f) / 3;
++	}
++
++	b->win_v[b->win_pos] = vbat / 1000;
++	b->win_i[b->win_pos] = ibat / 1000;
++	b->win_pos = (b->win_pos + 1) % WIN;
++	if (b->win_n < WIN)
++		b->win_n++;
++	b->ticks++;
++	if (!usb && b->ticks % LEARN_POLLS == 0)
++		adc_battery_learn_esr(b);
++
++	ocv = b->v_f + (int)div_s64((s64)b->i_f * esr_mohm, 1000);
++	b->ocv_uv = ocv;
++	est = power_supply_batinfo_ocv2cap(b->info, ocv, 25);
++	if (est < 0) {
++		mutex_unlock(&b->lock);
++		return false;
++	}
++	est = clamp(est, 0, 100);
++	charging = usb && b->i_f < -CHARGING_MIN_UA;
++
++	if (b->cap < 0) {
 +		b->cap = est;
-+	else if (est > b->cap)
-+		b->cap++;
-+	else if (est < b->cap)
-+		b->cap--;
-+	b->status = adc_battery_status(b, vbat, usb);
++	} else if (usb && b->v_f >= (int)b->full_uv) {
++		b->cap = 100;
++	} else if (est == 0) {
++		b->cap = 0;
++	} else {
++		delta = est - b->cap;
++		if (delta && ((delta < 0 && !charging) || (delta > 0 && charging))) {
++			/* with the energy flow: follow, 1 % per step */
++			if (b->ticks % STEP_POLLS == 0)
++				b->cap += delta < 0 ? -1 : 1;
++		} else if (abs(delta) >= CORRECT_MIN_DELTA && b->ticks % CORRECT_POLLS == 0) {
++			/* against it: only a slow correction of a large error */
++			b->cap += delta < 0 ? -1 : 1;
++		}
++	}
++	b->status = adc_battery_status(b, b->v_f, usb);
++
++	if (debug)
++		dev_info(b->dev, "v=%d uV i=%d uA esr=%u mOhm ocv=%d uV est=%d%% cap=%d%% usb=%d\n",
++			 vbat, ibat, esr_mohm, ocv, est, b->cap, usb);
++
++	changed = (b->cap != old_cap) || (b->status != old_status);
 +	mutex_unlock(&b->lock);
++	return changed;
 +}
 +
 +static int adc_battery_get_property(struct power_supply *psy,
@@ -244,8 +397,7 @@ index 000000000..e7eada49d
 +				    union power_supply_propval *val)
 +{
 +	struct adc_battery *b = power_supply_get_drvdata(psy);
-+	bool usb;
-+	int vbat, cap, status, ret;
++	int vbat, cap, status, ocv, ibat, ret;
 +
 +	switch (psp) {
 +	case POWER_SUPPLY_PROP_PRESENT:
@@ -267,19 +419,26 @@ index 000000000..e7eada49d
 +	mutex_lock(&b->lock);
 +	cap = b->cap;
 +	status = b->status;
++	ocv = b->ocv_uv;
++	ibat = b->i_f;
 +	mutex_unlock(&b->lock);
 +	if (cap < 0)
 +		return -ENODATA;
 +
-+	if (psp == POWER_SUPPLY_PROP_VOLTAGE_NOW) {
-+		ret = adc_battery_sample(b, &vbat, &usb);
++	switch (psp) {
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		ret = adc_battery_read_vbat(b, &vbat);
 +		if (ret)
 +			return ret;
 +		val->intval = vbat;
-+		return 0;
-+	}
-+
-+	switch (psp) {
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
++		val->intval = ocv;
++		break;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		/* power_supply convention: positive while charging */
++		val->intval = -ibat;
++		break;
 +	case POWER_SUPPLY_PROP_STATUS:
 +		val->intval = status;
 +		break;
@@ -307,6 +466,8 @@ index 000000000..e7eada49d
 +	POWER_SUPPLY_PROP_PRESENT,
 +	POWER_SUPPLY_PROP_TECHNOLOGY,
 +	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_VOLTAGE_OCV,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
 +	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
 +	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
 +	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
@@ -326,8 +487,8 @@ index 000000000..e7eada49d
 +{
 +	struct adc_battery *b = container_of(work, struct adc_battery, work.work);
 +
-+	adc_battery_update(b);
-+	power_supply_changed(b->psy);
++	if (adc_battery_update(b))
++		power_supply_changed(b->psy);
 +	schedule_delayed_work(&b->work, msecs_to_jiffies(POLL_MS));
 +}
 +
@@ -336,6 +497,7 @@ index 000000000..e7eada49d
 +	struct device *dev = &pdev->dev;
 +	struct power_supply_config cfg = { };
 +	struct adc_battery *b;
++	unsigned int subtype;
 +	int ret;
 +
 +	b = devm_kzalloc(dev, sizeof(*b), GFP_KERNEL);
@@ -345,6 +507,18 @@ index 000000000..e7eada49d
 +	b->cap = -1;
 +	b->status = POWER_SUPPLY_STATUS_UNKNOWN;
 +	mutex_init(&b->lock);
++
++	ret = of_property_read_u32(dev->of_node, "reg", &b->base);
++	if (ret)
++		return dev_err_probe(dev, ret, "no gauge base address\n");
++	b->map = dev_get_regmap(dev->parent, NULL);
++	if (!b->map)
++		return dev_err_probe(dev, -ENODEV, "no parent regmap\n");
++
++	ret = regmap_read(b->map, b->base + QG_PERPH_SUBTYPE, &subtype);
++	if (ret)
++		return dev_err_probe(dev, ret, "gauge subtype\n");
++	b->i_scale_na = subtype == QG_SUBTYPE_IBAT_5A ? IRAW_NA_5A : IRAW_NA_10A;
 +
 +	b->vbat = devm_iio_channel_get(dev, "vbat");
 +	if (IS_ERR(b->vbat))
@@ -373,6 +547,7 @@ index 000000000..e7eada49d
 +		return ret;
 +	adc_battery_update(b);
 +	schedule_delayed_work(&b->work, msecs_to_jiffies(POLL_MS));
++	dev_info(dev, "fuel gauge subtype 0x%02x, initial ESR %u mOhm\n", subtype, esr_mohm);
 +	return 0;
 +}
 +
@@ -391,7 +566,7 @@ index 000000000..e7eada49d
 +};
 +module_platform_driver(adc_battery_driver);
 +
-+MODULE_DESCRIPTION("Voltage-based battery estimate from PMIC ADC (Pro1X)");
++MODULE_DESCRIPTION("Battery estimate from PMIC ADC voltage and gauge current (Pro1X)");
 +MODULE_LICENSE("GPL");
 diff --git a/drivers/power/supply/pro1x-charger-icl.c b/drivers/power/supply/pro1x-charger-icl.c
 new file mode 100644
