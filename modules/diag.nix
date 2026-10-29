@@ -2,15 +2,20 @@
 
 let
   cfg = config.pro1x.diag;
+  diagPkg = pkgs.pro1x-diag.override { debug = cfg.debug; };
 in
 {
-  options.pro1x.diag.enable = lib.mkEnableOption
-    "Qualcomm DIAG router (modem diagnostics over rpmsg, for RF/signalling debugging). Untested";
+  options.pro1x.diag = {
+    enable = lib.mkEnableOption
+      "Qualcomm DIAG router (modem diagnostics over rpmsg, for RF/signalling debugging). Untested";
+    debug = lib.mkEnableOption
+      "debug prints in diag-router (log masks sent to the modem, QRTR data packets); read them with journalctl -u diag-router";
+  };
 
   config = lib.mkIf cfg.enable {
     # CONFIG_RPMSG_CHAR / CONFIG_RPMSG_CTRL are built as modules in the Pro1X kernel.
     boot.kernelModules = [ "rpmsg_char" "rpmsg_ctrl" ];
-    environment.systemPackages = [ pkgs.pro1x-diag ];
+    environment.systemPackages = [ diagPkg ];
 
     systemd.services = {
       # QCSuper reads the PTY /run/diag; the router connects to the TCP socket.
@@ -32,7 +37,7 @@ in
         before = [ "rmtfs.service" ];
         serviceConfig = {
           ExecStartPre = "${pkgs.coreutils}/bin/sleep 1";
-          ExecStart = "${pkgs.coreutils}/bin/stdbuf -oL -eL ${pkgs.pro1x-diag}/bin/diag-router -s 127.0.0.1:2500";
+          ExecStart = "${pkgs.coreutils}/bin/stdbuf -oL -eL ${diagPkg}/bin/diag-router -s 127.0.0.1:2500";
           Restart = "on-failure";
         };
       };

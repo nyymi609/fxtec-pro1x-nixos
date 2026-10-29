@@ -1,0 +1,28 @@
+diff --git a/router/diag_cntl.c b/router/diag_cntl.c
+index 7c94ac9..2af1d79 100644
+--- a/router/diag_cntl.c
++++ b/router/diag_cntl.c
+@@ -346,6 +346,10 @@ void diag_cntl_send_log_mask(struct peripheral *peripheral, uint32_t equip_id)
+ 	}
+ 	len += mask_size;
+ 
++	if (!strcmp(peripheral->name, "modem"))
++		fprintf(stderr, "[DBG] log mask -> %s: equip %u status %u items %u size %u\n",
++			peripheral->name, equip_id, status, num_items, mask_size);
++
+ 	pkt = alloca(len);
+ 
+ 	pkt->hdr.cmd = DIAG_CNTL_CMD_LOG_MASK;
+diff --git a/router/peripheral-qrtr.c b/router/peripheral-qrtr.c
+index 9a3c59a..6bc7656 100644
+--- a/router/peripheral-qrtr.c
++++ b/router/peripheral-qrtr.c
+@@ -220,6 +220,8 @@ static int qrtr_data_recv(int fd, void *data)
+ 		return ret;
+ 	}
+ 
++	fprintf(stderr, "[DBG] %s DATA ch: type %d from %d:%d len %zu\n",
++		perif->name, pkt.type, pkt.node, pkt.port, pkt.data_len);
+ 	switch (pkt.type) {
+ 	case QRTR_TYPE_DEL_CLIENT:
+ 		break;

@@ -1,6 +1,9 @@
 # Qualcomm DIAG router (linux-msm/diag): talks to the modem's DIAG service over rpmsg
 # (libudev) and QRTR, and serves it to userspace tools.
-{ lib, stdenv, fetchgit, qrtr, systemdLibs }:
+{ lib, stdenv, fetchgit, qrtr, systemdLibs
+# Print the log-mask requests sent to the modem and every QRTR data packet received.
+, debug ? false
+}:
 
 stdenv.mkDerivation {
   pname = "qcom-diag";
@@ -11,6 +14,8 @@ stdenv.mkDerivation {
     rev = "23c12c167e93215853af4e59c021551767f6fec8";
     hash = "sha256-rDtXNYwXzd29iTv6ZXobX7WfTRruT6jGT7TQUIgiZPY=";
   };
+
+  patches = lib.optional debug ./debug.patch;
 
   buildInputs = [ qrtr systemdLibs ];
 
