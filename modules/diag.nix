@@ -32,7 +32,7 @@ in
         before = [ "rmtfs.service" ];
         serviceConfig = {
           ExecStartPre = "${pkgs.coreutils}/bin/sleep 1";
-          ExecStart = "${pkgs.pro1x-diag}/bin/diag-router -s 127.0.0.1:2500";
+          ExecStart = "${pkgs.coreutils}/bin/stdbuf -oL -eL ${pkgs.pro1x-diag}/bin/diag-router -s 127.0.0.1:2500";
           Restart = "on-failure";
         };
       };
