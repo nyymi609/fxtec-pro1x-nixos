@@ -12,8 +12,8 @@ stdenv.mkDerivation {
 
   src = fetchgit {
     url = "https://github.com/linux-msm/diag.git";
-    rev = "HEAD";
-    hash = lib.fakeHash;
+    rev = "23c12c167e93215853af4e59c021551767f6fec8";
+    hash = "sha256-rDtXNYwXzd29iTv6ZXobX7WfTRruT6jGT7TQUIgiZPY=";
   };
 
   nativeBuildInputs = [ meson ninja pkg-config ];
