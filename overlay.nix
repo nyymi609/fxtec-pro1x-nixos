@@ -4,6 +4,7 @@ final: prev: {
   pro1x-uboot = final.callPackage ./packages/uboot { };
   pro1x-audio = final.callPackage ./packages/audio { };
   pro1x-cameractrl = final.callPackage ./packages/cameractrl { };
+  pro1x-diag = final.callPackage ./packages/diag { };
 
   # libcamera with the Pro1X sensors (S5K4H7 front, IMX582 rear): sensor helpers
   # with the analogue gain model and black level. Kept under its own name so nothing
