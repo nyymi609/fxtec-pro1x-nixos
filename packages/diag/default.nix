@@ -1,10 +1,6 @@
 # Qualcomm DIAG router (linux-msm/diag): talks to the modem's DIAG service over rpmsg
-# and serves it to userspace tools.
-#
-# UNTESTED. First build: the hash below is a placeholder, Nix prints the real one;
-# then pin `rev` to a commit instead of HEAD. If the build fails on a missing
-# dependency, add it to buildInputs.
-{ lib, stdenv, fetchgit, meson, ninja, pkg-config, qrtr, systemdLibs }:
+# (libudev) and QRTR, and serves it to userspace tools.
+{ lib, stdenv, fetchgit, qrtr, systemdLibs }:
 
 stdenv.mkDerivation {
   pname = "qcom-diag";
@@ -16,8 +12,9 @@ stdenv.mkDerivation {
     hash = "sha256-rDtXNYwXzd29iTv6ZXobX7WfTRruT6jGT7TQUIgiZPY=";
   };
 
-  nativeBuildInputs = [ meson ninja pkg-config ];
   buildInputs = [ qrtr systemdLibs ];
+
+  makeFlags = [ "prefix=${placeholder "out"}" ];
 
   meta = {
     description = "Qualcomm DIAG router for the modem on mainline Linux";
