@@ -1,0 +1,34 @@
+--- a/src/mm-netlink.c
++++ b/src/mm-netlink.c
+@@ -229,17 +229,20 @@
+ {
+     GTask *task;
+     guint32 sequence_id;
++    MsgFunc completion_fn;
+ 
+     task = g_steal_pointer (&tr->completion_task);
+     sequence_id = tr->sequence_id;
++    completion_fn = tr->completion_fn;
+ 
++    /* Frees tr (transaction_free is the table's value destroy function) */
+     g_hash_table_remove (tr->self->transactions,
+-                         GUINT_TO_POINTER (tr->sequence_id));
++                         GUINT_TO_POINTER (sequence_id));
+ 
+     if (!saved_errno) {
+         GError *error = NULL;
+ 
+-        if (!tr->completion_fn (task, hdr, &error))
++        if (!completion_fn (task, hdr, &error))
+             g_task_return_error (task, error);
+     } else {
+         g_task_return_new_error (task, G_IO_ERROR, g_io_error_from_errno (saved_errno),
+@@ -522,7 +525,7 @@
+ 
+         switch (hdr->nlmsg_type) {
+         case NLMSG_ERROR:
+-            err = NLMSG_DATA (buf);
++            err = NLMSG_DATA (hdr);
+             nlerr = err->error;
+             break;
+         case RTM_NEWLINK:
