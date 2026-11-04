@@ -23,6 +23,11 @@ DURATION = float(sys.argv[2]) if len(sys.argv) > 2 else 300
 
 # SSID ranges and level masks (bit0 LOW, 1 MED, 2 HIGH, 3 ERROR, 4 FATAL)
 MSG_RANGES = [
+    # The boot flood off (GNSS, Wi-Fi, power manager ...), so the modem's
+    # debug buffer has room for the RF device creation; "set all masks"
+    # (subcommand 5) is refused through diag-router (bad length)
+    (0, 13, 0), (15, 125, 0), (4500, 4700, 0), (6000, 6100, 0),
+    (3007, 3007, 0), (9500, 9500, 0), (9503, 9510, 0),
     (14, 14, 0xFFFFFFFF),        # RF: device creation (PAPM/QPOET, PA, ASM), txlin
     (9501, 9501, 0x1F),          # LTE RRC
     (9502, 9502, 0xFFFFFFFF),    # LTE MAC RACH
@@ -77,15 +82,15 @@ def main():
     s.sendall(hdlc(log_mask(11, LTE_LOGS)))
     buf = b""
     counts = {}
-    end = time.time() + DURATION
+    end = time.monotonic() + DURATION
     last_print = 0
     try:
-        while time.time() < end:
+        while time.monotonic() < end:
             try:
                 data = s.recv(1 << 20)
             except socket.timeout:
                 data = b""
-            if data == b"" and time.time() > end:
+            if data == b"" and time.monotonic() > end:
                 break
             buf += data
             while b"\x7e" in buf:
