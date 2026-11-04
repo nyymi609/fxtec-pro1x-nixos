@@ -8,6 +8,11 @@ in
   options.pro1x.modem = {
     enable = lib.mkEnableOption "Qualcomm modem userspace services (tqftpserv, rmtfs, ModemManager)";
     verbose = lib.mkEnableOption "verbose logging for the modem services";
+    efsWritable = lib.mkEnableOption ''
+      writing the modem's EFS back to modemst1/modemst2 (rmtfs without -r),
+      as Android does. Off: the modem's writes (NV changes, network
+      registration state) stay in RAM until reboot. Back up modemst1,
+      modemst2, fsg and fsc first'';
   };
 
   config = lib.mkIf cfg.enable {
@@ -66,7 +71,7 @@ in
             exit 1
           '';
           TimeoutStartSec = 240;
-          ExecStart = "${pkgs.rmtfs}/bin/rmtfs -r -P -s${verbose}";
+          ExecStart = "${pkgs.rmtfs}/bin/rmtfs${lib.optionalString (!cfg.efsWritable) " -r"} -P -s${verbose}";
           Restart = "always";
           RestartSec = 1;
         };

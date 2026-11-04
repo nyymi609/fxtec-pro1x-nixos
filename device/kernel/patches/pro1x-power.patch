@@ -704,7 +704,7 @@ new file mode 100644
 index 000000000..b68dc24b6
 --- /dev/null
 +++ b/drivers/power/supply/pro1x-charger-icl.c
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,257 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * USB input current limit for the PMI632 "smb5" charger (F(x)tec Pro1X).
@@ -736,6 +736,8 @@ index 000000000..b68dc24b6
 +#define WDOG_PET		0x643	/* MISC base 0x600 + 0x43 */
 +#define  WDOG_PET_BIT		BIT(0)
 +#define WD_CFG			0x651
++#define  WDOG_TIMER_EN_ON_PLUGIN	BIT(1)
++#define  WDOG_TIMER_EN		BIT(0)
 +#define SNARL_BARK_BITE_CFG	0x653
 +#define DCDC_ICL_STATUS		0x107
 +#define POWER_PATH_STATUS	0x10b
@@ -757,6 +759,7 @@ index 000000000..b68dc24b6
 +
 +#define ICL_STEP_UA		50000
 +#define POLL_MS			2000
++#define RECOVER_MIN_MS		600000	/* re-enable a disabled charger at most this often */
 +
 +static unsigned int max_icl_ma = 1500;
 +module_param(max_icl_ma, uint, 0644);
@@ -770,6 +773,10 @@ index 000000000..b68dc24b6
 +module_param(pet_wdog, bool, 0644);
 +MODULE_PARM_DESC(pet_wdog, "Pet the charger watchdog while USB is present, and re-enable charging if it already bit");
 +
++static bool disable_wdog = true;
++module_param(disable_wdog, bool, 0444);
++MODULE_PARM_DESC(disable_wdog, "Turn the charger watchdog off at probe. Petting stops while the system is suspended, so otherwise it bites and stops charging during a long sleep.");
++
 +struct pro1x_chg {
 +	struct device *dev;
 +	struct regmap *map;
@@ -777,7 +784,7 @@ index 000000000..b68dc24b6
 +	struct delayed_work work;
 +	unsigned int applied_ma;	/* what this plug-in already got */
 +	bool present;
-+	bool recovered;
++	unsigned long recovered_at;	/* jiffies of the last re-enable, 0 = none yet */
 +	int last_state;
 +	unsigned int last_apsd, last_snk, last_icl;
 +};
@@ -843,7 +850,7 @@ index 000000000..b68dc24b6
 +			dev_dbg(c->dev, "input removed\n");
 +		c->present = false;
 +		c->applied_ma = 0;
-+		c->recovered = false;
++		c->recovered_at = 0;
 +		c->last_state = -1;
 +		goto out;
 +	}
@@ -873,8 +880,10 @@ index 000000000..b68dc24b6
 +				dev_info(c->dev, "charger state %u\n", st);
 +			c->last_state = st;
 +			rd(c, CHGR_ENABLE_CMD, &en);
-+			if (st == CHGR_STATE_DISABLED && (en & CHGR_ENABLE) && !c->recovered) {
-+				c->recovered = true;
++			if (st == CHGR_STATE_DISABLED && (en & CHGR_ENABLE) &&
++			    (!c->recovered_at ||
++			     time_after(jiffies, c->recovered_at + msecs_to_jiffies(RECOVER_MIN_MS)))) {
++				c->recovered_at = jiffies ?: 1;
 +				regmap_update_bits(c->map, c->base + CHGR_ENABLE_CMD, CHGR_ENABLE, 0);
 +				msleep(50);
 +				regmap_update_bits(c->map, c->base + CHGR_ENABLE_CMD, CHGR_ENABLE, CHGR_ENABLE);
@@ -915,6 +924,12 @@ index 000000000..b68dc24b6
 +	rd(c, WD_CFG, &wd);
 +	rd(c, SNARL_BARK_BITE_CFG, &wd2);
 +	dev_info(dev, "watchdog cfg 0x%02x, snarl/bark/bite 0x%02x\n", wd, wd2);
++	if (disable_wdog && (wd & (WDOG_TIMER_EN_ON_PLUGIN | WDOG_TIMER_EN))) {
++		regmap_update_bits(c->map, c->base + WD_CFG,
++				   WDOG_TIMER_EN_ON_PLUGIN | WDOG_TIMER_EN, 0);
++		rd(c, WD_CFG, &wd);
++		dev_info(dev, "watchdog disabled, cfg now 0x%02x\n", wd);
++	}
 +
 +	c->last_state = -1;
 +	INIT_DELAYED_WORK(&c->work, pro1x_chg_work);
