@@ -13,6 +13,10 @@ in
       as Android does. Off: the modem's writes (NV changes, network
       registration state) stay in RAM until reboot. Back up modemst1,
       modemst2, fsg and fsc first'';
+    xtra.enable = lib.mkEnableOption ''
+      XTRA for faster GPS fixes: the predicted orbits file is fetched from the
+      modem's own servers (xtracloud.net, ~50 KB, at most once a day) and
+      injected with the current time after boot and every 12 hours'';
   };
 
   config = lib.mkIf cfg.enable {
@@ -109,6 +113,28 @@ in
           done
           exit 1
         '';
+      };
+
+      # Injected data lives in the modem's RAM; ModemManager won't inject it
+      # here (see packages/xtra), so this does
+      pro1x-xtra = lib.mkIf cfg.xtra.enable {
+        description = "Fetch and inject XTRA (GPS predicted orbits) and time";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "pro1x-gnss-unlock.service" "network-online.target" ];
+        wants = [ "pro1x-gnss-unlock.service" ];
+        serviceConfig = {
+          Type = "oneshot";
+          StateDirectory = "pro1x-xtra";
+          ExecStart = "${pkgs.pro1x-xtra}/bin/pro1x-xtra";
+        };
+      };
+    };
+
+    systemd.timers.pro1x-xtra = lib.mkIf cfg.xtra.enable {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnUnitActiveSec = "12h";
+        RandomizedDelaySec = "30m";
       };
     };
   };
