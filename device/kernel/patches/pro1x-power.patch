@@ -1,5 +1,5 @@
 diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
-index 859ed5084..871a198e8 100644
+index 61a49b152..980cab3db 100644
 --- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
 +++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
 @@ -197,6 +197,35 @@ kbd-backlight {
@@ -38,7 +38,7 @@ index 859ed5084..871a198e8 100644
  	ts_vdd_supply: ts-vdd-supply {
  		compatible = "regulator-fixed";
  		regulator-name = "ts_vdd_supply";
-@@ -723,6 +752,27 @@ vol_up_n: vol-up-n-state {
+@@ -724,6 +753,27 @@ vol_up_n: vol-up-n-state {
  };
  
  &spmi_bus {
@@ -67,7 +67,7 @@ index 859ed5084..871a198e8 100644
  		/* Camera flash LEDs (torch/flash), two channels on the PMI632 (second SID) */
  		pmi632_flash: led-controller@d300 {
 diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
-index 83392ed6a..d2ac80e73 100644
+index 83392ed6a..1c177a996 100644
 --- a/drivers/power/supply/Kconfig
 +++ b/drivers/power/supply/Kconfig
 @@ -38,6 +38,24 @@ config APM_POWER
@@ -110,10 +110,10 @@ index 7ee839dca..342fdf10d 100644
  obj-$(CONFIG_APM_POWER)		+= apm_power.o
 diff --git a/drivers/power/supply/pro1x-adc-battery.c b/drivers/power/supply/pro1x-adc-battery.c
 new file mode 100644
-index 000000000..e7eada49d
+index 000000000..18f31bc22
 --- /dev/null
 +++ b/drivers/power/supply/pro1x-adc-battery.c
-@@ -0,0 +1,585 @@
+@@ -0,0 +1,733 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Battery state of charge for the F(x)tec Pro1X (PMI632).
@@ -166,6 +166,8 @@ index 000000000..e7eada49d
 +#define GAP_MAX_CHARGE_MS	(12 * 3600 * 1000LL)	/* longest suspend credited with charge */
 +#define RATCHET_RELEASE		3	/* % the estimate may be off before the reading follows it back */
 +#define NOTIFY_MIN_MS		30000	/* every power_supply_changed() is a wake-up event */
++#define PLUG_FOLLOW_MS		2000	/* re-read this soon after a plug change: the charge current ramps up */
++#define RELAX_MS		(20 * 60 * 1000)	/* after a charger: the voltage still carries polarisation */
 +#define DEFAULT_FULL_UAH	3150000
 +#define LEARN_POLLS		6
 +#define WIN			24	/* regression window: 2 minutes of samples */
@@ -177,6 +179,12 @@ index 000000000..e7eada49d
 +#define BURST_AVG_HOLD_FOR_READ	BIT(0)
 +#define QG_LAST_BURST_AVG_I	0xc6
 +#define QG_I_RESET		0x8000
++#define QG_STATUS2		0x09
++#define  QG_GOOD_OCV		BIT(1)
++#define QG_S3_GOOD_OCV_V	0x74	/* rest voltage the gauge measured in sleep */
++#define QG_V_NV_PER_LSB		194637
++#define SLEEP_OCV_MIN_UV	3000000
++#define SLEEP_OCV_MAX_UV	4500000
 +
 +#define IRAW_NA_5A		152588	/* nA per LSB, 5 A current ADC */
 +#define IRAW_NA_10A		305176
@@ -195,12 +203,17 @@ index 000000000..e7eada49d
 +module_param(esr_learn, bool, 0644);
 +MODULE_PARM_DESC(esr_learn, "Learn esr_mohm from voltage vs current (set 0 to keep a hand-set value)");
 +
++static bool use_sleep_ocv = true;
++module_param(use_sleep_ocv, bool, 0644);
++MODULE_PARM_DESC(use_sleep_ocv, "Set the charge count from the gauge's sleep OCV when it has a new one");
++
 +static bool debug;
 +module_param(debug, bool, 0644);
 +MODULE_PARM_DESC(debug, "Log every poll: voltage, current, ESR, OCV, estimate");
 +
 +struct adc_battery {
 +	struct device *dev;
++	bool ready;		/* work initialised: external_power_changed may queue it */
 +	struct power_supply *psy;
 +	struct power_supply_battery_info *info;
 +	struct iio_channel *vbat;
@@ -225,8 +238,13 @@ index 000000000..e7eada49d
 +	ktime_t last_t;
 +	bool have_t;
 +	bool notify_pending;
++	bool status_changed;	/* the last update changed the status: notify at once */
++	unsigned int plug_follow;	/* after a plug change: 1 poll now, 2 the follow-up; raw current decides */
 +	unsigned int reanchor_left;	/* polls left to re-anchor after a long sleep */
++	ktime_t last_usb_t;	/* last poll with a charger in */
++	bool had_usb;
 +	unsigned long last_notify;
++	u16 sleep_ocv_raw;	/* last S3 good OCV seen, to use each one once */
 +
 +	int cap;		/* reported (%), -1 until the first sample */
 +	int status;
@@ -290,9 +308,51 @@ index 000000000..e7eada49d
 +	return 0;
 +}
 +
++/*
++ * The gauge measures the open-circuit voltage itself while the system sleeps at low
++ * current (its S3 state) and flags a good one in STATUS2, as downstream qpnp-qg reads it
++ * from the good-OCV interrupt. A new value is a rest voltage without load or
++ * polarisation, better than anything measured awake. Returns 0 and the voltage only for
++ * a value not seen before.
++ */
++static int adc_battery_read_sleep_ocv(struct adc_battery *b, int *ocv_uv)
++{
++	unsigned int status;
++	u8 raw[2];
++	u16 u;
++	int ret;
++
++	ret = regmap_read(b->map, b->base + QG_STATUS2, &status);
++	if (ret)
++		return ret;
++	if (!(status & QG_GOOD_OCV))
++		return -ENODATA;
++	ret = regmap_bulk_read(b->map, b->base + QG_S3_GOOD_OCV_V, raw, sizeof(raw));
++	if (ret)
++		return ret;
++	u = get_unaligned_le16(raw);
++	if (u == b->sleep_ocv_raw)
++		return -ENODATA;
++	b->sleep_ocv_raw = u;
++	*ocv_uv = div_u64((u64)u * QG_V_NV_PER_LSB, 1000);
++	if (*ocv_uv < SLEEP_OCV_MIN_UV || *ocv_uv > SLEEP_OCV_MAX_UV)
++		return -ERANGE;
++	return 0;
++}
++
 +static int adc_battery_read_usb(struct adc_battery *b, bool *usb)
 +{
 +	int usbin, ret;
++
++	/*
++	 * The charger's "usb" supply knows at once; the USBIN voltage decays for a few
++	 * seconds after an unplug and still read as present then.
++	 */
++	ret = b->psy ? power_supply_am_i_supplied(b->psy) : -ENODEV;
++	if (ret >= 0) {
++		*usb = ret > 0;
++		return 0;
++	}
 +
 +	ret = adc_read_uv(b->usbin, &usbin);
 +	if (ret)
@@ -335,12 +395,15 @@ index 000000000..e7eada49d
 +		dev_info(b->dev, "esr sample %lld mOhm -> %u mOhm\n", r, esr_mohm);
 +}
 +
-+static int adc_battery_status(struct adc_battery *b, int vbat, bool usb)
++static int adc_battery_status(struct adc_battery *b, int vbat, bool usb, bool charging)
 +{
 +	if (!usb)
 +		return POWER_SUPPLY_STATUS_DISCHARGING;
 +	if (vbat >= b->full_uv)
 +		return POWER_SUPPLY_STATUS_FULL;
++	/* USB in but no current into the battery: a charge limit holds, or input too weak */
++	if (!charging)
++		return POWER_SUPPLY_STATUS_NOT_CHARGING;
 +	return POWER_SUPPLY_STATUS_CHARGING;
 +}
 +
@@ -352,16 +415,18 @@ index 000000000..e7eada49d
 +/* Returns true when the reported capacity or status changed. */
 +static bool adc_battery_update(struct adc_battery *b)
 +{
-+	int vbat, ibat, est, ocv, old_cap, old_status, max_anchor_ua;
++	int vbat, ibat, est, ocv, old_cap, old_status, max_anchor_ua, sleep_ocv = 0;
++	bool have_sleep_ocv, sleep_anchored = false;
 +	s64 dq, est_q, dt_ms = 0, gap_ms = 0;
 +	int new_cap;
 +	ktime_t now;
-+	bool usb, charging, full, gap = false, long_gap = false, changed;
++	bool usb, charging, full, gap = false, long_gap = false, changed, relaxing;
 +
 +	if (adc_battery_read_vbat(b, &vbat) || adc_battery_read_usb(b, &usb))
 +		return false;
 +	if (adc_battery_read_ibat(b, &ibat))
 +		return false;
++	have_sleep_ocv = use_sleep_ocv && !adc_battery_read_sleep_ocv(b, &sleep_ocv);
 +
 +	mutex_lock(&b->lock);
 +	old_cap = b->cap;
@@ -391,6 +456,18 @@ index 000000000..e7eada49d
 +	b->last_t = now;
 +	b->have_t = true;
 +
++	/*
++	 * For a while after a charger was in, even briefly, the battery voltage stays
++	 * raised by charge polarisation and the OCV estimate reads high: a 30 s charge
++	 * before a sleep lifted it by about 12 %. Until it has relaxed the count runs
++	 * on current alone; a re-anchor that came due meanwhile waits for the end.
++	 */
++	if (usb) {
++		b->last_usb_t = now;
++		b->had_usb = true;
++	}
++	relaxing = !usb && b->had_usb && ktime_ms_delta(now, b->last_usb_t) < RELAX_MS;
++
 +	if (!b->filt_valid) {
 +		b->v_f = vbat;
 +		b->i_f = ibat;
@@ -418,7 +495,9 @@ index 000000000..e7eada49d
 +	}
 +	est = clamp(est, 0, 100);
 +	est_q = div_s64((s64)est * b->q_full_uah, 100);
-+	charging = usb && b->i_f < -CHARGING_MIN_UA;
++	/* Right after a plug change the filter lags: the raw current decides as well. */
++	charging = usb && (b->i_f < -CHARGING_MIN_UA ||
++			   (b->plug_follow && ibat < -CHARGING_MIN_UA));
 +	full = usb && b->v_f >= (int)b->full_uv;
 +
 +	if (!b->have_q) {
@@ -432,11 +511,28 @@ index 000000000..e7eada49d
 +			dq = dq * CHG_EFFICIENCY_PCT / 100;
 +		b->q_uah = clamp_t(s64, b->q_uah - dq, 0, b->q_full_uah);
 +
++		/* a fresh rest voltage from the gauge sets the count outright */
++		if (have_sleep_ocv && !usb && !relaxing) {
++			int s_est = power_supply_batinfo_ocv2cap(b->info, sleep_ocv, 25);
++
++			if (s_est >= 0) {
++				s_est = clamp(s_est, 0, 100);
++				dev_info(b->dev, "sleep OCV %d uV: %d%% (count was %lld uAh, now %lld)\n",
++					 sleep_ocv, s_est, b->q_uah,
++					 div_s64((s64)s_est * b->q_full_uah, 100));
++				b->q_uah = div_s64((s64)s_est * b->q_full_uah, 100);
++				b->reanchor_left = 0;
++				sleep_anchored = true;
++			}
++		}
++
 +		/* the OCV estimate corrects the count, but only where it is reliable */
 +		max_anchor_ua = charging ? ANCHOR_MAX_UA_CHG : ANCHOR_MAX_UA_DISCH;
 +		if (charging)
 +			b->reanchor_left = 0;
-+		if (b->reanchor_left) {
++		if (relaxing || sleep_anchored) {
++			/* count only, see above; or just set from the sleep OCV */
++		} else if (b->reanchor_left) {
 +			/*
 +			 * After a long sleep the count missed everything drawn meanwhile.
 +			 * The first polls after the wake-up run under its load, so keep
@@ -468,20 +564,21 @@ index 000000000..e7eada49d
 +	 * boundary cannot flip it back and forth (each change is a wake-up event).
 +	 * A larger error is followed.
 +	 */
-+	if (b->cap >= 0 && !long_gap && !full && new_cap != 0) {
++	if (b->cap >= 0 && (!long_gap || relaxing) && !sleep_anchored && !full && new_cap != 0) {
 +		if (charging && new_cap < b->cap && b->cap - new_cap < RATCHET_RELEASE)
 +			new_cap = b->cap;
 +		else if (!charging && new_cap > b->cap && new_cap - b->cap < RATCHET_RELEASE)
 +			new_cap = b->cap;
 +	}
 +	b->cap = new_cap;
-+	b->status = adc_battery_status(b, b->v_f, usb);
++	b->status = adc_battery_status(b, b->v_f, usb, charging);
 +
 +	if (debug)
 +		dev_info(b->dev, "v=%d uV i=%d uA esr=%u mOhm ocv=%d uV est=%d%% q=%lld uAh cap=%d%% usb=%d gap=%lldms\n",
 +			 vbat, ibat, esr_mohm, ocv, est, b->q_uah, b->cap, usb, gap ? gap_ms : 0LL);
 +
-+	changed = (b->cap != old_cap) || (b->status != old_status);
++	b->status_changed = b->status != old_status;
++	changed = (b->cap != old_cap) || b->status_changed;
 +	mutex_unlock(&b->lock);
 +	return changed;
 +}
@@ -491,7 +588,7 @@ index 000000000..e7eada49d
 +				    union power_supply_propval *val)
 +{
 +	struct adc_battery *b = power_supply_get_drvdata(psy);
-+	int vbat, cap, status, ocv, ibat, ret;
++	int vbat, cap, status, ocv, ibat;
 +
 +	switch (psp) {
 +	case POWER_SUPPLY_PROP_PRESENT:
@@ -515,15 +612,18 @@ index 000000000..e7eada49d
 +	status = b->status;
 +	ocv = b->ocv_uv;
 +	ibat = b->i_f;
++	vbat = b->v_f;
 +	mutex_unlock(&b->lock);
 +	if (cap < 0)
 +		return -ENODATA;
 +
 +	switch (psp) {
 +	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-+		ret = adc_battery_read_vbat(b, &vbat);
-+		if (ret)
-+			return ret;
++		/*
++		 * The filtered value of the last poll: no ADC read here, so a uevent
++		 * (which reads every property) goes out at once, also while a poll
++		 * holds the ADC.
++		 */
 +		val->intval = vbat;
 +		break;
 +	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
@@ -569,28 +669,75 @@ index 000000000..e7eada49d
 +	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
 +};
 +
++/* The charger's "usb" supply changed (plug or unplug): read now instead of at the next poll. */
++static void adc_battery_external_power_changed(struct power_supply *psy)
++{
++	struct adc_battery *b = power_supply_get_drvdata(psy);
++	bool unplugged = false;
++
++	if (!b || !READ_ONCE(b->ready))
++		return;
++
++	/*
++	 * An unplug is known now, without the ADC: report Discharging in the same
++	 * moment as the charger's own event. Userspace that combines the two (mce,
++	 * lipstick's charging notification after a 100 ms settle) otherwise sees
++	 * "charger gone, still charging" and announces charging on the unplug.
++	 */
++	if (power_supply_am_i_supplied(psy) == 0) {
++		mutex_lock(&b->lock);
++		if (b->status != POWER_SUPPLY_STATUS_DISCHARGING &&
++		    b->status != POWER_SUPPLY_STATUS_UNKNOWN) {
++			b->status = POWER_SUPPLY_STATUS_DISCHARGING;
++			unplugged = true;
++		}
++		mutex_unlock(&b->lock);
++		if (unplugged) {
++			b->last_notify = jiffies;
++			power_supply_changed(psy);
++		}
++	}
++
++	WRITE_ONCE(b->plug_follow, 1);
++	/* let the uevents of the plug change go out before the ADC gets busy */
++	mod_delayed_work(system_wq, &b->work, msecs_to_jiffies(200));
++}
++
 +static const struct power_supply_desc adc_battery_desc = {
 +	.name = "battery",
 +	.type = POWER_SUPPLY_TYPE_BATTERY,
 +	.properties = adc_battery_props,
 +	.num_properties = ARRAY_SIZE(adc_battery_props),
 +	.get_property = adc_battery_get_property,
++	.external_power_changed = adc_battery_external_power_changed,
 +};
 +
 +static void adc_battery_poll(struct work_struct *work)
 +{
 +	struct adc_battery *b = container_of(work, struct adc_battery, work.work);
 +
++	unsigned int next = POLL_MS;
++
 +	if (adc_battery_update(b))
 +		b->notify_pending = true;
-+	/* power_supply_changed() is a wake-up event: keep it rare */
++	/*
++	 * power_supply_changed() is a wake-up event: keep capacity updates rare, but a
++	 * status change (plug, unplug, charging, full) goes out at once.
++	 */
 +	if (b->notify_pending &&
-+	    time_after(jiffies, b->last_notify + msecs_to_jiffies(NOTIFY_MIN_MS))) {
++	    (b->status_changed ||
++	     time_after(jiffies, b->last_notify + msecs_to_jiffies(NOTIFY_MIN_MS)))) {
 +		b->notify_pending = false;
 +		b->last_notify = jiffies;
 +		power_supply_changed(b->psy);
 +	}
-+	schedule_delayed_work(&b->work, msecs_to_jiffies(POLL_MS));
++	if (b->plug_follow) {
++		/* first poll after the plug change: one more soon; after that, normal */
++		if (b->plug_follow == 1)
++			next = PLUG_FOLLOW_MS;
++		b->plug_follow = b->plug_follow == 1 ? 2 : 0;
++	}
++	schedule_delayed_work(&b->work, msecs_to_jiffies(next));
 +}
 +
 +/* No polling while the system sleeps; the first poll after resume re-anchors the count. */
@@ -677,6 +824,7 @@ index 000000000..e7eada49d
 +		return ret;
 +	adc_battery_update(b);
 +	schedule_delayed_work(&b->work, msecs_to_jiffies(POLL_MS));
++	WRITE_ONCE(b->ready, true);
 +	dev_info(dev, "fuel gauge subtype 0x%02x, initial ESR %u mOhm\n", subtype, esr_mohm);
 +	return 0;
 +}
@@ -701,10 +849,10 @@ index 000000000..e7eada49d
 +MODULE_LICENSE("GPL");
 diff --git a/drivers/power/supply/pro1x-charger-icl.c b/drivers/power/supply/pro1x-charger-icl.c
 new file mode 100644
-index 000000000..b68dc24b6
+index 000000000..369c74f2c
 --- /dev/null
 +++ b/drivers/power/supply/pro1x-charger-icl.c
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,401 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * USB input current limit for the PMI632 "smb5" charger (F(x)tec Pro1X).
@@ -724,6 +872,7 @@ index 000000000..b68dc24b6
 +#include <linux/module.h>
 +#include <linux/of.h>
 +#include <linux/platform_device.h>
++#include <linux/power_supply.h>
 +#include <linux/regmap.h>
 +#include <linux/workqueue.h>
 +
@@ -743,6 +892,8 @@ index 000000000..b68dc24b6
 +#define POWER_PATH_STATUS	0x10b
 +#define  USE_USBIN		BIT(4)
 +#define APSD_RESULT_STATUS	0x308
++#define CMD_APSD		0x341
++#define  APSD_RERUN		BIT(0)
 +#define  APSD_DCP		BIT(3)
 +#define  APSD_CDP		BIT(2)
 +#define  APSD_QC2		BIT(5)
@@ -785,6 +936,11 @@ index 000000000..b68dc24b6
 +	unsigned int applied_ma;	/* what this plug-in already got */
 +	bool present;
 +	unsigned long recovered_at;	/* jiffies of the last re-enable, 0 = none yet */
++	unsigned int polls_in;	/* polls since this plug-in */
++	bool apsd_rerun;	/* charger detection re-run once for this plug-in */
++	bool user_disabled;	/* charging switched off through charging_enabled */
++	struct power_supply *psy;	/* "usb": cable state for usb-moded and mce */
++	struct power_supply_desc psy_desc;
 +	int last_state;
 +	unsigned int last_apsd, last_snk, last_icl;
 +};
@@ -837,10 +993,63 @@ index 000000000..b68dc24b6
 +		 before, ma, after);
 +}
 +
++static const enum power_supply_property pro1x_usb_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++};
++
++static int pro1x_usb_get_property(struct power_supply *psy, enum power_supply_property psp,
++				  union power_supply_propval *val)
++{
++	struct pro1x_chg *c = power_supply_get_drvdata(psy);
++
++	if (psp != POWER_SUPPLY_PROP_ONLINE)
++		return -EINVAL;
++	val->intval = c->present;
++	return 0;
++}
++
++/*
++ * usb-moded tells a PC from a wall charger by the supply type (USB, USB_DCP, USB_CDP), so
++ * the type follows the charger detection (APSD) of the current plug-in.
++ */
++static void pro1x_usb_update(struct pro1x_chg *c, bool was_present, unsigned int apsd)
++{
++	enum power_supply_type t = POWER_SUPPLY_TYPE_USB;
++
++	if (!c->psy)
++		return;
++	if (c->present && (apsd & (APSD_DCP | APSD_QC2 | APSD_QC3)))
++		t = POWER_SUPPLY_TYPE_USB_DCP;
++	else if (c->present && (apsd & APSD_CDP))
++		t = POWER_SUPPLY_TYPE_USB_CDP;
++	if (was_present != c->present || t != c->psy_desc.type) {
++		c->psy_desc.type = t;
++		/*
++		 * On an unplug the battery reports Discharging first: mce counts the
++		 * charger as connected while the battery still says Charging, and
++		 * usb-moded reacts to this supply at once, so with the battery's event
++		 * second lipstick briefly saw "charging, no USB mode" and announced
++		 * charging on the unplug. Both events go out from work items, so give
++		 * the battery's a head start (this runs in the poll work anyway).
++		 */
++		if (was_present && !c->present) {
++			struct power_supply *bat = power_supply_get_by_name("battery");
++
++			if (bat) {
++				power_supply_external_power_changed(bat);
++				power_supply_put(bat);
++				msleep(30);
++			}
++		}
++		power_supply_changed(c->psy);
++	}
++}
++
 +static void pro1x_chg_work(struct work_struct *w)
 +{
 +	struct pro1x_chg *c = container_of(to_delayed_work(w), struct pro1x_chg, work);
 +	unsigned int pp = 0, apsd = 0, snk = 0, want, icl;
++	bool was_present = c->present;
 +
 +	if (rd(c, POWER_PATH_STATUS, &pp))
 +		goto out;
@@ -849,8 +1058,11 @@ index 000000000..b68dc24b6
 +		if (c->present)
 +			dev_dbg(c->dev, "input removed\n");
 +		c->present = false;
++		pro1x_usb_update(c, was_present, 0);
 +		c->applied_ma = 0;
 +		c->recovered_at = 0;
++		c->polls_in = 0;
++		c->apsd_rerun = false;
 +		c->last_state = -1;
 +		goto out;
 +	}
@@ -864,6 +1076,21 @@ index 000000000..b68dc24b6
 +		dev_info(c->dev, "input in: apsd 0x%02x, typec-snk 0x%02x, limit %u mA\n",
 +			 apsd, snk, icl);
 +	c->present = true;
++	/*
++	 * Some hub ports present a charger at power-on and only become a data port a
++	 * moment later; detection then reads DCP or QC, usb-moded stays in charging mode
++	 * and the gadget never comes up. Re-run the detection once, a few seconds after
++	 * the plug-in (as downstream smb5 does when required): a wall charger reads the
++	 * same again.
++	 */
++	if (c->polls_in < 2)
++		c->polls_in++;
++	else if (!c->apsd_rerun && (apsd & (APSD_DCP | APSD_QC2 | APSD_QC3))) {
++		c->apsd_rerun = true;
++		regmap_write(c->map, c->base + CMD_APSD, APSD_RERUN);
++		dev_info(c->dev, "detection read 0x%02x, re-running it once\n", apsd);
++	}
++	pro1x_usb_update(c, was_present, apsd);
 +	c->last_apsd = apsd;
 +	c->last_snk = snk;
 +	c->last_icl = icl;
@@ -880,7 +1107,7 @@ index 000000000..b68dc24b6
 +				dev_info(c->dev, "charger state %u\n", st);
 +			c->last_state = st;
 +			rd(c, CHGR_ENABLE_CMD, &en);
-+			if (st == CHGR_STATE_DISABLED && (en & CHGR_ENABLE) &&
++			if (st == CHGR_STATE_DISABLED && (en & CHGR_ENABLE) && !c->user_disabled &&
 +			    (!c->recovered_at ||
 +			     time_after(jiffies, c->recovered_at + msecs_to_jiffies(RECOVER_MIN_MS)))) {
 +				c->recovered_at = jiffies ?: 1;
@@ -900,6 +1127,49 @@ index 000000000..b68dc24b6
 +out:
 +	schedule_delayed_work(&c->work, msecs_to_jiffies(POLL_MS));
 +}
++
++/*
++ * charging_enabled: 1 charges, 0 stops charging while the phone keeps running from USB.
++ * mce writes it to hold a charge limit ([Charging] ControlPath in its config).
++ */
++static ssize_t charging_enabled_show(struct device *dev, struct device_attribute *attr,
++				     char *buf)
++{
++	struct pro1x_chg *c = dev_get_drvdata(dev);
++	unsigned int en = 0;
++	int ret;
++
++	ret = rd(c, CHGR_ENABLE_CMD, &en);
++	if (ret)
++		return ret;
++	return sysfs_emit(buf, "%d\n", !!(en & CHGR_ENABLE));
++}
++
++static ssize_t charging_enabled_store(struct device *dev, struct device_attribute *attr,
++				      const char *buf, size_t count)
++{
++	struct pro1x_chg *c = dev_get_drvdata(dev);
++	bool on;
++	int ret;
++
++	ret = kstrtobool(buf, &on);
++	if (ret)
++		return ret;
++	c->user_disabled = !on;
++	ret = regmap_update_bits(c->map, c->base + CHGR_ENABLE_CMD, CHGR_ENABLE,
++				 on ? CHGR_ENABLE : 0);
++	if (ret)
++		return ret;
++	dev_info(dev, "charging %s\n", on ? "enabled" : "disabled");
++	return count;
++}
++static DEVICE_ATTR_RW(charging_enabled);
++
++static struct attribute *pro1x_chg_attrs[] = {
++	&dev_attr_charging_enabled.attr,
++	NULL
++};
++ATTRIBUTE_GROUPS(pro1x_chg);
 +
 +static int pro1x_chg_probe(struct platform_device *pdev)
 +{
@@ -932,6 +1202,23 @@ index 000000000..b68dc24b6
 +	}
 +
 +	c->last_state = -1;
++	c->psy_desc.name = "usb";
++	c->psy_desc.type = POWER_SUPPLY_TYPE_USB;
++	c->psy_desc.properties = pro1x_usb_props;
++	c->psy_desc.num_properties = ARRAY_SIZE(pro1x_usb_props);
++	c->psy_desc.get_property = pro1x_usb_get_property;
++	{
++		static char *supplied_to[] = { "battery" };
++		struct power_supply_config cfg = {
++			.drv_data = c,
++			.supplied_to = supplied_to,
++			.num_supplicants = ARRAY_SIZE(supplied_to),
++		};
++
++		c->psy = devm_power_supply_register(dev, &c->psy_desc, &cfg);
++		if (IS_ERR(c->psy))
++			return dev_err_probe(dev, PTR_ERR(c->psy), "usb power supply\n");
++	}
 +	INIT_DELAYED_WORK(&c->work, pro1x_chg_work);
 +	platform_set_drvdata(pdev, c);
 +	schedule_delayed_work(&c->work, msecs_to_jiffies(POLL_MS));
@@ -941,7 +1228,11 @@ index 000000000..b68dc24b6
 +
 +static void pro1x_chg_remove(struct platform_device *pdev)
 +{
-+	cancel_delayed_work_sync(&((struct pro1x_chg *)platform_get_drvdata(pdev))->work);
++	struct pro1x_chg *c = platform_get_drvdata(pdev);
++
++	cancel_delayed_work_sync(&c->work);
++	if (c->user_disabled)
++		regmap_update_bits(c->map, c->base + CHGR_ENABLE_CMD, CHGR_ENABLE, CHGR_ENABLE);
 +}
 +
 +static const struct of_device_id pro1x_chg_of_match[] = {
@@ -954,6 +1245,7 @@ index 000000000..b68dc24b6
 +	.driver = {
 +		.name = "pro1x-charger-icl",
 +		.of_match_table = pro1x_chg_of_match,
++		.dev_groups = pro1x_chg_groups,
 +	},
 +	.probe = pro1x_chg_probe,
 +	.remove = pro1x_chg_remove,

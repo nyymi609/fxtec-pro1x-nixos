@@ -38,8 +38,8 @@ in
           rev = "40e50412812adce9dddc2be9a4510ebce05eef89";
           hash = "sha256-+VbVvPfKLgNrg3tliUFWG32Y/HPdNpD6XkaCHsU+DiY=";
         };
-        patches = [ ../packages/hexagonrpc-sns-registry.patch ]
-          ++ lib.optional cfg.probeUnknownInterfaces ../packages/hexagonrpc-probe.patch;
+        patches = [ ../packages/hexagonrpc/sns-registry.patch ]
+          ++ lib.optional cfg.probeUnknownInterfaces ../packages/hexagonrpc/probe.patch;
       });
       defaultText = lib.literalMD "nixpkgs `hexagonrpc` built from linux-msm/hexagonrpc pull request 27";
       description = "The hexagonrpc package providing hexagonrpcd. It must be able to write files.";

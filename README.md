@@ -34,7 +34,7 @@ Torch / flash LED               Works
 Vibration motor                 Works   AW86224, strength tunable
 Battery level                   Works   ADC-based estimate, not a real fuel gauge
 Charging                        Works   input current limit + watchdog handled by a small driver
-Suspend                         Works
+Suspend                         Works   s2idle down to RPM vmin, modem wakes it (see Credits)
 Sensors (accel, gyro, mag, ALS, proximity)
                                 Partly  ADSP via hexagonrpcd, start by hand, see below
 Full-disk encryption            Works   LUKS2 + unl0kr on-screen unlock keyboard
@@ -44,13 +44,12 @@ SD card, NFC, video codecs      Untested
 ## Layout
 
 ```
-flake.nix               outputs: nixosModules, nixosConfigurations, packages, lib, templates
+flake.nix               outputs: nixosModules, nixosConfigurations, packages, lib
 overlay.nix             pro1x-kernel / -firmware / -uboot / -audio / -libcamera, patched phoc
 device/                 distro-independent: kernel patches + config, UCM, keyd, udev, libcamera, sensor files
 packages/               Nix packages (kernel, uboot, firmware, audio, cameractrl)
 modules/                NixOS modules (hardware, audio, camera, keyboard, modem, sensors, usb-network, encryption)
 hosts/                  minimal (console + ssh) and phosh
-templates/host/         starter flake for your own configuration
 lib/                    boot image / flash script builders (mkArtifacts)
 scripts/                deploy.sh, flash-encrypted.sh, kernel config generator
 tools/                  on-device diagnostics and tuning helpers
@@ -115,7 +114,6 @@ What you get from the flake:
 | `overlays.default` | `pro1x-kernel`, `pro1x-firmware`, `pro1x-uboot`, `pro1x-audio`, `pro1x-libcamera`, patched `phoc` |
 | `lib.mkArtifacts system cfg` | `{ flashScript, rootfsImg, ubootImg, flashUbootScript }` for any config that imports the default module |
 | `lib.mkImages system cfg` | the same, named `flash`, `rootfs`, `uboot-img`, `flash-uboot` |
-| `templates.default` | starter flake (below) |
 
 Enable the parts you want in your configuration (see "Configuration" below):
 
@@ -160,10 +158,29 @@ Build on the PC and deploy, or point the phone at the PC as a remote builder.
 
 ## Build your own image from your own config
 
+A small flake that imports the default module:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    pro1x.url = "github:nyymi609/fxtec-pro1x-nixos";
+    pro1x.inputs.nixpkgs.follows = "nixpkgs";
+  };
+  outputs = { nixpkgs, pro1x, ... }: rec {
+    nixosConfigurations.my-pro1x = nixpkgs.lib.nixosSystem {
+      modules = [
+        pro1x.nixosModules.default
+        pro1x.nixosModules.cross-kernel   # on an x86_64 PC, see "Cross-compiling"
+        ./configuration.nix
+      ];
+    };
+    packages.x86_64-linux = pro1x.lib.mkImages "x86_64-linux" nixosConfigurations.my-pro1x;
+  };
+}
+```
+
 ```sh
-mkdir my-pro1x && cd my-pro1x
-nix flake init -t github:nyymi609/fxtec-pro1x-nixos
-$EDITOR flake.nix configuration.nix     # set the repo url, hostname, ssh key, desktop
 git init && git add -A
 nix build .#flash
 ./result/bin/pro1x-flash                # phone in fastboot mode
@@ -376,3 +393,12 @@ They are read-only unless the header says otherwise; most need `sudo` on the pho
 
 Kernel base and firmware from the sm6115-mainline project, boot image and build
 knowledge from macneisj's Pro1X build script and the postmarketOS port.
+
+The sleep, display, audio, charger and battery fixes in `device/kernel/patches/` come from
+moWerk's SailfishOS port of this phone,
+[sailfishos-pro1x-mainline](https://github.com/moWerk/sailfishos-pro1x-mainline)
+(`kernel/patches-7.3`, itself based on this repository), brought back to 7.1 and folded into
+the patches here. Its `kernel/HANDOVER.md` explains each one. Some of them came from the
+[Lenovo TB-J606L port](https://github.com/haltia-de/device-lenovo-tb-j606l).
+The modem wake (`pro1x-qrtr-modem-wake`, in `pro1x-sleep.patch`) comes from the
+[Guix port](https://github.com/mlaparie/fxtec-pro1x-guix).

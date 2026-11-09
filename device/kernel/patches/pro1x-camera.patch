@@ -1,5 +1,5 @@
 diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
-index 7e45a078e..33e3ac538 100644
+index c1a250add..fde3a70b7 100644
 --- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
 +++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
 @@ -88,6 +88,34 @@ key-volume-up {
@@ -120,7 +120,7 @@ index 7e45a078e..33e3ac538 100644
  	pca9534: gpio@21 {
  		compatible = "nxp,pca9534";
  		reg = <0x21>;
-@@ -766,6 +870,34 @@ spk_amp_default: spk-amp-default-state {
+@@ -767,6 +871,34 @@ spk_amp_default: spk-amp-default-state {
  		bias-disable;
  	};
  
@@ -155,7 +155,7 @@ index 7e45a078e..33e3ac538 100644
  	ts_i2c_gpio: ts-i2c-gpio-state {
  		pins = "gpio6", "gpio7";
  		function = "gpio";
-@@ -868,3 +1000,104 @@ dai@1 {
+@@ -869,3 +1001,104 @@ dai@1 {
  		reg = <VOICEMMODE1>;
  	};
  };
@@ -577,10 +577,10 @@ index 90b276a74..0a7cabca6 100644
  obj-$(CONFIG_VIDEO_S5KJN1) += s5kjn1.o
 diff --git a/drivers/media/i2c/dw9800.c b/drivers/media/i2c/dw9800.c
 new file mode 100644
-index 000000000..8504c8c06
+index 000000000..6313c3de7
 --- /dev/null
 +++ b/drivers/media/i2c/dw9800.c
-@@ -0,0 +1,336 @@
+@@ -0,0 +1,358 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Driver for the Dongwoon DW9800 voice coil motor driver (10-bit DAC).
@@ -601,9 +601,19 @@ index 000000000..8504c8c06
 +
 +#define DW9800_MAX_FOCUS_POS	1023
 +
-+/* The lens is moved in steps of this many codes when powering up/down. */
-+#define DW9800_CTRL_STEPS	16
++/* Status poll interval while the VCM is busy. */
 +#define DW9800_CTRL_DELAY_US	1000
++
++/*
++ * Power-up and park ramps: this many equal steps, this long each, whatever the
++ * distance. Faster ramps make the voice coil ring against the end stop, which is
++ * audible as a click from the camera.
++ */
++#define DW9800_RAMP_STEPS	16
++#define DW9800_RAMP_DELAY_US	4000
++
++/* Keep the lens powered this long after the last close (quick reopens). */
++#define DW9800_AUTOSUSPEND_MS	2000
 +
 +#define DW9800_CTL_ADDR		0x02	/* bit 0: power down */
 +#define DW9800_MSB_ADDR		0x03	/* DAC[9:8] */
@@ -629,6 +639,8 @@ index 000000000..8504c8c06
 +	struct v4l2_subdev sd;
 +	struct regulator_bulk_data supplies[2];
 +	u16 current_val;
++	/* Position last written to the DAC (0 after power-up) */
++	u16 dac_val;
 +};
 +
 +static inline struct dw9800 *sd_to_dw9800(struct v4l2_subdev *sd)
@@ -693,6 +705,8 @@ index 000000000..8504c8c06
 +		return 0;
 +
 +	ret = dw9800_set_dac(client, ctrl->val);
++	if (!ret)
++		dw->dac_val = ctrl->val;
 +	pm_runtime_put(&client->dev);
 +
 +	return ret;
@@ -709,7 +723,8 @@ index 000000000..8504c8c06
 +
 +static int dw9800_close(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 +{
-+	pm_runtime_put(sd->dev);
++	pm_runtime_mark_last_busy(sd->dev);
++	pm_runtime_put_autosuspend(sd->dev);
 +	return 0;
 +}
 +
@@ -767,7 +782,7 @@ index 000000000..8504c8c06
 +{
 +	struct i2c_client *client = to_i2c_client(dev);
 +	struct dw9800 *dw = sd_to_dw9800(i2c_get_clientdata(client));
-+	int ret, val;
++	int ret, val, i;
 +
 +	ret = dw9800_power_up(dw);
 +	if (ret) {
@@ -775,13 +790,15 @@ index 000000000..8504c8c06
 +		return ret;
 +	}
 +
-+	for (val = dw->current_val % DW9800_CTRL_STEPS;
-+	     val < dw->current_val + DW9800_CTRL_STEPS - 1;
-+	     val += DW9800_CTRL_STEPS) {
++	dw->dac_val = 0;
++	for (i = 1; i <= DW9800_RAMP_STEPS; i++) {
++		val = dw->current_val * i / DW9800_RAMP_STEPS;
 +		ret = dw9800_set_dac(client, val);
 +		if (ret)
 +			dev_err_ratelimited(dev, "resume I2C failure: %d\n", ret);
-+		usleep_range(DW9800_CTRL_DELAY_US, DW9800_CTRL_DELAY_US + 10);
++		else
++			dw->dac_val = val;
++		usleep_range(DW9800_RAMP_DELAY_US, DW9800_RAMP_DELAY_US + 100);
 +	}
 +
 +	return 0;
@@ -792,15 +809,17 @@ index 000000000..8504c8c06
 +{
 +	struct i2c_client *client = to_i2c_client(dev);
 +	struct dw9800 *dw = sd_to_dw9800(i2c_get_clientdata(client));
-+	int ret, val;
++	int ret, val, i;
 +
-+	for (val = dw->current_val & ~(DW9800_CTRL_STEPS - 1); val >= 0;
-+	     val -= DW9800_CTRL_STEPS) {
++	/* From where the lens really is (nothing to park right after probe) */
++	for (i = DW9800_RAMP_STEPS - 1; i >= 0 && dw->dac_val; i--) {
++		val = dw->dac_val * i / DW9800_RAMP_STEPS;
 +		ret = dw9800_set_dac(client, val);
 +		if (ret)
 +			dev_err_once(dev, "suspend I2C failure: %d\n", ret);
-+		usleep_range(DW9800_CTRL_DELAY_US, DW9800_CTRL_DELAY_US + 10);
++		usleep_range(DW9800_RAMP_DELAY_US, DW9800_RAMP_DELAY_US + 100);
 +	}
++	dw->dac_val = 0;
 +
 +	dw9800_power_down(dw);
 +
@@ -863,6 +882,8 @@ index 000000000..8504c8c06
 +		goto err_entity;
 +
 +	pm_runtime_set_active(dev);
++	pm_runtime_set_autosuspend_delay(dev, DW9800_AUTOSUSPEND_MS);
++	pm_runtime_use_autosuspend(dev);
 +	pm_runtime_enable(dev);
 +	pm_runtime_idle(dev);
 +
@@ -885,6 +906,7 @@ index 000000000..8504c8c06
 +	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 +	struct dw9800 *dw = sd_to_dw9800(sd);
 +
++	pm_runtime_dont_use_autosuspend(&client->dev);
 +	pm_runtime_disable(&client->dev);
 +	if (!pm_runtime_status_suspended(&client->dev))
 +		dw9800_runtime_suspend(&client->dev);

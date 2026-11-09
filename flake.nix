@@ -85,11 +85,6 @@
         host-phosh = ./hosts/phosh;
       };
 
-      templates.default = {
-        path = ./templates/host;
-        description = "Your own Pro1X host built on this flake";
-      };
-
       nixosConfigurations =
         lib.mapAttrs (n: m: mkExample n m false) examples
         // lib.mapAttrs' (n: m: lib.nameValuePair "${n}-xc" (mkExample n m true)) examples;

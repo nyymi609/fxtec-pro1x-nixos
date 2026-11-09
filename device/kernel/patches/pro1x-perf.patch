@@ -1,0 +1,105 @@
+GPU memory bandwidth votes and the UFS PM QoS vote following the clocks.
+From moWerk/sailfishos-pro1x-mainline kernel/patches-7.3 (0021, 0024).
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115.dtsi b/arch/arm64/boot/dts/qcom/sm6115.dtsi
+index dad4318de..c4b6c52d3 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6115.dtsi
+@@ -1816,6 +1816,9 @@ gpu: gpu@5900000 {
+ 			interrupts = <GIC_SPI 177 IRQ_TYPE_LEVEL_HIGH>;
+ 
+ 			iommus = <&adreno_smmu 0 1>;
++			interconnects = <&bimc MASTER_GRAPHICS_3D RPM_ALWAYS_TAG
++					 &bimc SLAVE_EBI_CH0 RPM_ALWAYS_TAG>;
++			interconnect-names = "gfx-mem";
+ 			operating-points-v2 = <&gpu_opp_table>;
+ 			power-domains = <&rpmpd SM6115_VDDCX>;
+ 			qcom,gmu = <&gmu_wrapper>;
+@@ -1835,36 +1838,42 @@ gpu_opp_table: opp-table {
+ 
+ 				opp-320000000 {
+ 					opp-hz = /bits/ 64 <320000000>;
++					opp-peak-kBps = <1720000>;
+ 					required-opps = <&rpmpd_opp_low_svs>;
+ 					opp-supported-hw = <0x1f>;
+ 				};
+ 
+ 				opp-465000000 {
+ 					opp-hz = /bits/ 64 <465000000>;
++					opp-peak-kBps = <2929000>;
+ 					required-opps = <&rpmpd_opp_svs>;
+ 					opp-supported-hw = <0x1f>;
+ 				};
+ 
+ 				opp-600000000 {
+ 					opp-hz = /bits/ 64 <600000000>;
++					opp-peak-kBps = <3879000>;
+ 					required-opps = <&rpmpd_opp_svs_plus>;
+ 					opp-supported-hw = <0x1f>;
+ 				};
+ 
+ 				opp-745000000 {
+ 					opp-hz = /bits/ 64 <745000000>;
++					opp-peak-kBps = <6881000>;
+ 					required-opps = <&rpmpd_opp_nom>;
+ 					opp-supported-hw = <0xf>;
+ 				};
+ 
+ 				opp-820000000 {
+ 					opp-hz = /bits/ 64 <820000000>;
++					opp-peak-kBps = <6881000>;
+ 					required-opps = <&rpmpd_opp_nom_plus>;
+ 					opp-supported-hw = <0x7>;
+ 				};
+ 
+ 				opp-900000000 {
+ 					opp-hz = /bits/ 64 <900000000>;
++					opp-peak-kBps = <6881000>;
+ 					required-opps = <&rpmpd_opp_turbo>;
+ 					opp-supported-hw = <0x7>;
+ 				};
+@@ -1872,12 +1881,14 @@ opp-900000000 {
+ 				/* Speed bin 2 can reach 950 Mhz instead of 980 like the rest. */
+ 				opp-950000000 {
+ 					opp-hz = /bits/ 64 <950000000>;
++					opp-peak-kBps = <6881000>;
+ 					required-opps = <&rpmpd_opp_turbo_plus>;
+ 					opp-supported-hw = <0x4>;
+ 				};
+ 
+ 				opp-980000000 {
+ 					opp-hz = /bits/ 64 <980000000>;
++					opp-peak-kBps = <6881000>;
+ 					required-opps = <&rpmpd_opp_turbo_plus>;
+ 					opp-supported-hw = <0x3>;
+ 				};
+diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
+index c3f08957d..bf82c28de 100644
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -1237,7 +1237,9 @@ int ufshcd_scale_clks(struct ufs_hba *hba, unsigned long freq, bool scale_up)
+ 		goto out;
+ 	}
+ 
+-	ufshcd_pm_qos_update(hba, scale_up);
++	/* The vote follows the clocks (ufshcd_setup_clocks); scaling down keeps it */
++	if (scale_up)
++		ufshcd_pm_qos_update(hba, true);
+ 
+ out:
+ 	trace_ufshcd_profile_clk_scaling(hba,
+@@ -9741,8 +9743,12 @@ static int ufshcd_setup_clocks(struct ufs_hba *hba, bool on)
+ 	if (ret)
+ 		return ret;
+ 
+-	if (!ufshcd_is_clkscaling_supported(hba))
+-		ufshcd_pm_qos_update(hba, on);
++	/*
++	 * Keep the CPU latency vote for as long as the clocks run, also with
++	 * clock scaling: at queue depth 1 the load can stay below the scale-up
++	 * threshold, and every request then waits for a CPU leaving deep idle.
++	 */
++	ufshcd_pm_qos_update(hba, on);
+ out:
+ 	if (ret) {
+ 		list_for_each_entry(clki, head, list) {

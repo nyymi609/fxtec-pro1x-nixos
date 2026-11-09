@@ -19,6 +19,9 @@ let
     "haptics" # AW86224 vibration motor
     "bluetooth" # WCN3950
     "ipa" # modem data path
+    "sleep" # s2idle down to RPM vmin, DSPs and UFS through it, modem wakes it
+    "perf" # GPU bandwidth votes, UFS PM QoS
+    "wifi" # ath10k channel info log spam
   ];
 
   configfile = ../../device/kernel/config.aarch64;
