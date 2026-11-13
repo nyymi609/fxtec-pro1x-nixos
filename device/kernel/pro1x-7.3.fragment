@@ -1,0 +1,16 @@
+# Options the 7.3 series needs beyond config.aarch64 (appended before
+# olddefconfig): the SMP2P sleep state driver (0032), RPM master stats
+# (0037: which master blocks XO shutdown, debugfs).
+CONFIG_QCOM_SMP2P_SLEEPSTATE=m
+CONFIG_QCOM_RPM_MASTER_STATS=m
+# The rear camera's flash LED as a V4L2 subdevice: 0027 lists it in the sensor's
+# flash-leds, and the camera's media device waits for it (moWerk's sfos.fragment
+# sets this too).  Off here on 7.3: both sensors with 0 media links, "No camera
+# found" (2026-11-03).
+CONFIG_V4L2_FLASH_LED_CLASS=m
+# Bluetooth LE mice and keyboards (HID over GATT): BlueZ creates their input
+# devices through /dev/uhid, and without it "input-hog profile accept failed"
+# (an Elecom Relacon, 2026-11-08).  Built in, so the node exists from boot.
+CONFIG_UHID=y
+# Elecom's quirks, the Relacon's extra buttons among them.
+CONFIG_HID_ELECOM=m

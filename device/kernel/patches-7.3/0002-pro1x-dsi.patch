@@ -1,0 +1,50 @@
+From 5a6733c025ba38e8f0164d45613d331cba43a332 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Mon, 26 Oct 2026 14:24:12 +0100
+Subject: [PATCH 02/16] pro1x-dsi
+
+From fxtec-pro1x-nixos device/kernel/patches/pro1x-dsi.patch (nyymi609, written
+against v7.1), rebased onto v7.3 for the SailfishOS port. The board DTS hunks were
+3-way merged with upstream 7.1..7.3 changes to sm6115-fxtec-pro1x.dts.
+
+LLMGD-0 A0
+---
+ drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c b/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c
+index 84c21c62a..d7e611c85 100644
+--- a/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c
++++ b/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c
+@@ -168,7 +168,12 @@ static int boe_bf060y8m_aj0_unprepare(struct drm_panel *panel)
+ }
+ 
+ static const struct drm_display_mode boe_bf060y8m_aj0_mode = {
+-	.clock = 165268,
++	/*
++	 * 1236 x 2192 total at exactly 60 Hz, like the stock mode (stock reports
++	 * fps=60). 165268 kHz made it 61.00 Hz, which made the touchscreen report
++	 * ghost touches (about 5000 events/10 s with the panel on, none at 60 Hz).
++	 */
++	.clock = 162559,
+ 	.hdisplay = 1080,
+ 	.hsync_start = 1080 + 36,
+ 	.hsync_end = 1080 + 36 + 24,
+@@ -345,8 +350,12 @@ static int boe_bf060y8m_aj0_probe(struct mipi_dsi_device *dsi)
+ 
+ 	dsi->lanes = 4;
+ 	dsi->format = MIPI_DSI_FMT_RGB888;
+-	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_NO_EOT_PACKET |
+-			  MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
++	/*
++	 * Link settings as in the stock panel node: non-burst with sync events
++	 * (not sync pulses; no VIDEO_SYNC_PULSE flag) and EOT packets appended
++	 * (qcom,mdss-dsi-tx-eot-append; no NO_EOT_PACKET flag).
++	 */
++	dsi->mode_flags = MIPI_DSI_MODE_VIDEO |
+ 			  MIPI_DSI_CLOCK_NON_CONTINUOUS |
+ 			  MIPI_DSI_MODE_LPM;
+ 
+-- 
+2.56.0
+

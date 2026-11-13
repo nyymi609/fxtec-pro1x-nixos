@@ -1,0 +1,43 @@
+From cb5ab8deba8dd2cde3f213625a8a4cc5cb4f67e5 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sat, 31 Oct 2026 19:39:56 +0100
+Subject: [PATCH 51/51] arm64: dts: qcom: sm6115-pro1x: route the SPMI
+ interrupt through the MPM
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+In system sleep the GIC is off and only interrupts that reach the MPM
+wake the phone. The SPMI arbiter carries the power key, the RTC alarms
+and the USB-C attach; without this a plugged-in cable was seen only
+868 s later. As on agatti, pin 86.
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it; built and tested on the device by the model)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index 789bc0e4c..66ea921fb 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -1686,6 +1686,15 @@ system_pd: power-domain-system {
+ 	};
+ };
+ 
++/*
++ * In system sleep the GIC is off: an interrupt wakes the phone only if it reaches the MPM.
++ * The SPMI arbiter carries the power key, the RTC alarms and the USB-C attach (as on agatti).
++ * TSENS is left on the GIC: the downstream pin 2 maps to GIC 190, sm6115's TSENS is SPI 275.
++ */
++&spmi_bus {
++	interrupts-extended = <&mpm 86 IRQ_TYPE_LEVEL_HIGH>;
++};
++
+ &cluster_0_pd {
+ 	power-domains = <&system_pd>;
+ };
+-- 
+2.56.0
+

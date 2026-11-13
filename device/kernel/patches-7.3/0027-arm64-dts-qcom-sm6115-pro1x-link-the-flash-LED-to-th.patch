@@ -1,0 +1,42 @@
+From 0bcc19ae539418fb45a9327ff682f1739061141a Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Fri, 30 Oct 2026 00:28:39 +0100
+Subject: [PATCH] arm64: dts: qcom: sm6115-pro1x: link the flash LED to the
+ rear camera
+
+flash-leds on the IMX582 node: with CONFIG_V4L2_FLASH_LED_CLASS the
+white PMI632 flash LED's V4L2 flash subdevice is bound by the sensor's
+async notifier and gets its /dev/v4l-subdev node in the camera's media
+device. The sandboxed camera app switches the LED there (it cannot
+write /sys).
+
+Tested: jolla-camera flash on photos and the video light work.
+---
+ arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index 8af4542b2..a0e7a3e69 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -791,7 +791,7 @@ pmi632_flash: led-controller@d300 {
+ 			compatible = "qcom,pmi8998-flash-led", "qcom,spmi-flash-led";
+ 			reg = <0xd300>;
+ 
+-			led-0 {
++			flash_led_white: led-0 {
+ 				function = LED_FUNCTION_FLASH;
+ 				color = <LED_COLOR_ID_WHITE>;
+ 				led-sources = <2>;
+@@ -1474,6 +1474,8 @@ rear_camera: camera@10 {
+ 		vana-supply = <&vreg_l4p>;
+ 		vdig-supply = <&vreg_l1p>;
+ 		lens-focus = <&rear_lens>;
++		/* the flash LED's V4L2 subdevice joins the camera's media device */
++		flash-leds = <&flash_led_white>;
+ 
+ 		orientation = <1>;
+ 		rotation = <270>;
+-- 
+2.56.0
+

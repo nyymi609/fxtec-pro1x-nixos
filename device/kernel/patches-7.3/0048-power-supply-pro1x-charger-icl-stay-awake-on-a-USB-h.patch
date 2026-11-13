@@ -1,0 +1,82 @@
+From a745e67e2f894c3cfa6501cb0e46e37f276e240c Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sat, 31 Oct 2026 17:39:08 +0100
+Subject: [PATCH] power: supply: pro1x-charger-icl: stay awake on a USB host
+ port
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A sleeping phone does not answer its USB host: host traffic cannot
+wake the system through the gadget, so developer mode and MTP over
+USB worked only between wakeups once the charge limit had stopped
+charging. Like the downstream dwc3-msm driver, hold the wakeup source
+while plugged into anything but a dedicated charger (DCP, QC); on a
+wall charger it is still held only while charging. awake_on_host=0
+turns it off.
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it; built and tested on the device by the model)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/power/supply/pro1x-charger-icl.c | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/power/supply/pro1x-charger-icl.c b/drivers/power/supply/pro1x-charger-icl.c
+index 2c23a5d8b..9417f636d 100644
+--- a/drivers/power/supply/pro1x-charger-icl.c
++++ b/drivers/power/supply/pro1x-charger-icl.c
+@@ -66,6 +66,10 @@ static bool pet_wdog = true;
+ module_param(pet_wdog, bool, 0644);
+ MODULE_PARM_DESC(pet_wdog, "Pet the charger watchdog while USB is present, and re-enable charging if it already bit");
+ 
++static bool awake_on_host = true;
++module_param(awake_on_host, bool, 0644);
++MODULE_PARM_DESC(awake_on_host, "Stay awake while plugged into anything but a dedicated charger, so the USB gadget (developer mode, MTP) stays reachable");
++
+ struct pro1x_chg {
+ 	struct device *dev;
+ 	struct regmap *map;
+@@ -146,7 +150,21 @@ static void pro1x_chg_set_awake(struct pro1x_chg *c, bool awake)
+ 		pm_stay_awake(c->dev);
+ 	else
+ 		pm_relax(c->dev);
+-	dev_dbg(c->dev, "%s while charging\n", awake ? "staying awake" : "may sleep");
++	dev_dbg(c->dev, "%s\n", awake ? "staying awake" : "may sleep");
++}
++
++/*
++ * A sleeping phone does not answer its USB host: the gadget cannot wake the system on
++ * host traffic. Like the downstream dwc3-msm driver, stay awake while plugged into a
++ * host or hub port; on a wall charger (DCP, QC) only while charging.
++ */
++static bool pro1x_chg_want_awake(struct pro1x_chg *c)
++{
++	if (!c->present)
++		return false;
++	if (awake_on_host && c->psy_desc.type != POWER_SUPPLY_TYPE_USB_DCP)
++		return true;
++	return !c->user_disabled && c->last_state != CHGR_STATE_TERMINATED;
+ }
+ 
+ static const enum power_supply_property pro1x_usb_props[] = {
+@@ -258,7 +276,7 @@ static void pro1x_chg_work(struct work_struct *w)
+ 			}
+ 		}
+ 	}
+-	pro1x_chg_set_awake(c, !c->user_disabled && c->last_state != CHGR_STATE_TERMINATED);
++	pro1x_chg_set_awake(c, pro1x_chg_want_awake(c));
+ 
+ 	want = wanted_ma(apsd, snk);
+ 	if (want > icl && want > c->applied_ma) {
+@@ -303,7 +321,7 @@ static ssize_t charging_enabled_store(struct device *dev, struct device_attribut
+ 		return ret;
+ 	dev_info(dev, "charging %s\n", on ? "enabled" : "disabled");
+ 	if (!on)
+-		pro1x_chg_set_awake(c, false);
++		pro1x_chg_set_awake(c, pro1x_chg_want_awake(c));
+ 	return count;
+ }
+ static DEVICE_ATTR_RW(charging_enabled);
+-- 
+2.56.0
+

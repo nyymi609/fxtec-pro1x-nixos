@@ -1,0 +1,158 @@
+From 3f2478db2efb735cea6713ea708d8ea6256f4a10 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sat, 31 Oct 2026 12:38:50 +0100
+Subject: [PATCH] power: supply: pro1x-adc-battery: anchor on the gauge's sleep
+ OCV
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The QG measures the open-circuit voltage itself while the system sleeps
+at low current and flags a good one in STATUS2 (S3 good OCV, 0x74, the
+value downstream qpnp-qg takes from its good-OCV interrupt). Use each
+new one to set the charge count outright, unless a charger is in or the
+battery still relaxes from one. Until now a long sleep re-anchored on
+voltages measured awake under the resume load, and the reading jumped
+(56 -> 38 % in one night). use_sleep_ocv=0 turns it off.
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it from the downstream qpnp-qg registers; built, not yet on the device)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=web
+---
+ drivers/power/supply/pro1x-adc-battery.c | 68 ++++++++++++++++++++++--
+ 1 file changed, 64 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/power/supply/pro1x-adc-battery.c b/drivers/power/supply/pro1x-adc-battery.c
+index 10901e397..c232e39f7 100644
+--- a/drivers/power/supply/pro1x-adc-battery.c
++++ b/drivers/power/supply/pro1x-adc-battery.c
+@@ -63,6 +63,12 @@
+ #define BURST_AVG_HOLD_FOR_READ	BIT(0)
+ #define QG_LAST_BURST_AVG_I	0xc6
+ #define QG_I_RESET		0x8000
++#define QG_STATUS2		0x09
++#define  QG_GOOD_OCV		BIT(1)
++#define QG_S3_GOOD_OCV_V	0x74	/* rest voltage the gauge measured in sleep */
++#define QG_V_NV_PER_LSB		194637
++#define SLEEP_OCV_MIN_UV	3000000
++#define SLEEP_OCV_MAX_UV	4500000
+ 
+ #define IRAW_NA_5A		152588	/* nA per LSB, 5 A current ADC */
+ #define IRAW_NA_10A		305176
+@@ -81,6 +87,10 @@ static bool esr_learn = true;
+ module_param(esr_learn, bool, 0644);
+ MODULE_PARM_DESC(esr_learn, "Learn esr_mohm from voltage vs current (set 0 to keep a hand-set value)");
+ 
++static bool use_sleep_ocv = true;
++module_param(use_sleep_ocv, bool, 0644);
++MODULE_PARM_DESC(use_sleep_ocv, "Set the charge count from the gauge's sleep OCV when it has a new one");
++
+ static bool debug;
+ module_param(debug, bool, 0644);
+ MODULE_PARM_DESC(debug, "Log every poll: voltage, current, ESR, OCV, estimate");
+@@ -118,6 +128,7 @@ struct adc_battery {
+ 	ktime_t last_usb_t;	/* last poll with a charger in */
+ 	bool had_usb;
+ 	unsigned long last_notify;
++	u16 sleep_ocv_raw;	/* last S3 good OCV seen, to use each one once */
+ 
+ 	int cap;		/* reported (%), -1 until the first sample */
+ 	int status;
+@@ -181,6 +192,38 @@ static int adc_battery_read_ibat(struct adc_battery *b, int *ibat_ua)
+ 	return 0;
+ }
+ 
++/*
++ * The gauge measures the open-circuit voltage itself while the system sleeps at low
++ * current (its S3 state) and flags a good one in STATUS2, as downstream qpnp-qg reads it
++ * from the good-OCV interrupt. A new value is a rest voltage without load or
++ * polarisation, better than anything measured awake. Returns 0 and the voltage only for
++ * a value not seen before.
++ */
++static int adc_battery_read_sleep_ocv(struct adc_battery *b, int *ocv_uv)
++{
++	unsigned int status;
++	u8 raw[2];
++	u16 u;
++	int ret;
++
++	ret = regmap_read(b->map, b->base + QG_STATUS2, &status);
++	if (ret)
++		return ret;
++	if (!(status & QG_GOOD_OCV))
++		return -ENODATA;
++	ret = regmap_bulk_read(b->map, b->base + QG_S3_GOOD_OCV_V, raw, sizeof(raw));
++	if (ret)
++		return ret;
++	u = get_unaligned_le16(raw);
++	if (u == b->sleep_ocv_raw)
++		return -ENODATA;
++	b->sleep_ocv_raw = u;
++	*ocv_uv = div_u64((u64)u * QG_V_NV_PER_LSB, 1000);
++	if (*ocv_uv < SLEEP_OCV_MIN_UV || *ocv_uv > SLEEP_OCV_MAX_UV)
++		return -ERANGE;
++	return 0;
++}
++
+ static int adc_battery_read_usb(struct adc_battery *b, bool *usb)
+ {
+ 	int usbin, ret;
+@@ -256,7 +299,8 @@ static int adc_battery_cap_from_q(struct adc_battery *b)
+ /* Returns true when the reported capacity or status changed. */
+ static bool adc_battery_update(struct adc_battery *b)
+ {
+-	int vbat, ibat, est, ocv, old_cap, old_status, max_anchor_ua;
++	int vbat, ibat, est, ocv, old_cap, old_status, max_anchor_ua, sleep_ocv = 0;
++	bool have_sleep_ocv, sleep_anchored = false;
+ 	s64 dq, est_q, dt_ms = 0, gap_ms = 0;
+ 	int new_cap;
+ 	ktime_t now;
+@@ -266,6 +310,7 @@ static bool adc_battery_update(struct adc_battery *b)
+ 		return false;
+ 	if (adc_battery_read_ibat(b, &ibat))
+ 		return false;
++	have_sleep_ocv = use_sleep_ocv && !adc_battery_read_sleep_ocv(b, &sleep_ocv);
+ 
+ 	mutex_lock(&b->lock);
+ 	old_cap = b->cap;
+@@ -350,12 +395,27 @@ static bool adc_battery_update(struct adc_battery *b)
+ 			dq = dq * CHG_EFFICIENCY_PCT / 100;
+ 		b->q_uah = clamp_t(s64, b->q_uah - dq, 0, b->q_full_uah);
+ 
++		/* a fresh rest voltage from the gauge sets the count outright */
++		if (have_sleep_ocv && !usb && !relaxing) {
++			int s_est = power_supply_batinfo_ocv2cap(b->info, sleep_ocv, 25);
++
++			if (s_est >= 0) {
++				s_est = clamp(s_est, 0, 100);
++				dev_info(b->dev, "sleep OCV %d uV: %d%% (count was %lld uAh, now %lld)\n",
++					 sleep_ocv, s_est, b->q_uah,
++					 div_s64((s64)s_est * b->q_full_uah, 100));
++				b->q_uah = div_s64((s64)s_est * b->q_full_uah, 100);
++				b->reanchor_left = 0;
++				sleep_anchored = true;
++			}
++		}
++
+ 		/* the OCV estimate corrects the count, but only where it is reliable */
+ 		max_anchor_ua = charging ? ANCHOR_MAX_UA_CHG : ANCHOR_MAX_UA_DISCH;
+ 		if (charging)
+ 			b->reanchor_left = 0;
+-		if (relaxing) {
+-			/* count only, see above */
++		if (relaxing || sleep_anchored) {
++			/* count only, see above; or just set from the sleep OCV */
+ 		} else if (b->reanchor_left) {
+ 			/*
+ 			 * After a long sleep the count missed everything drawn meanwhile.
+@@ -388,7 +448,7 @@ static bool adc_battery_update(struct adc_battery *b)
+ 	 * boundary cannot flip it back and forth (each change is a wake-up event).
+ 	 * A larger error is followed.
+ 	 */
+-	if (b->cap >= 0 && (!long_gap || relaxing) && !full && new_cap != 0) {
++	if (b->cap >= 0 && (!long_gap || relaxing) && !sleep_anchored && !full && new_cap != 0) {
+ 		if (charging && new_cap < b->cap && b->cap - new_cap < RATCHET_RELEASE)
+ 			new_cap = b->cap;
+ 		else if (!charging && new_cap > b->cap && new_cap - b->cap < RATCHET_RELEASE)
+-- 
+2.56.0
+

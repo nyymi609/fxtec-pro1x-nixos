@@ -1,0 +1,52 @@
+From 5d197ded17c8ee2d38f019b31277d314ff40e429 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Thu, 29 Oct 2026 20:45:36 +0100
+Subject: [PATCH] scsi: ufs: core: keep the PM QoS vote while the clocks run
+
+With clock scaling, the CPU latency vote followed only the scaling:
+on at scale-up, off at scale-down. At queue depth 1 (a 16 KiB O_DIRECT
+read loop) the load can stay below the scale-up threshold, so the CPUs
+keep entering deep idle (exit latency 666 us on SM6115) between
+requests. Benchymark's storage read on the Pro1-X: 48 MB/s, 91 MB/s
+with the deep idle state disabled.
+
+Let the vote follow the clocks, as it already does without clock
+scaling: on while they run, off when they are gated after idle.
+Scaling down no longer removes it.
+---
+ drivers/ufs/core/ufshcd.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
+index ca8329052..72cc70fc4 100644
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -1214,7 +1214,9 @@ int ufshcd_scale_clks(struct ufs_hba *hba, unsigned long freq, bool scale_up)
+ 		goto out;
+ 	}
+ 
+-	ufshcd_pm_qos_update(hba, scale_up);
++	/* The vote follows the clocks (ufshcd_setup_clocks); scaling down keeps it */
++	if (scale_up)
++		ufshcd_pm_qos_update(hba, true);
+ 
+ out:
+ 	trace_ufshcd_profile_clk_scaling(hba,
+@@ -9857,8 +9859,12 @@ static int ufshcd_setup_clocks(struct ufs_hba *hba, bool on)
+ 	if (ret)
+ 		return ret;
+ 
+-	if (!ufshcd_is_clkscaling_supported(hba))
+-		ufshcd_pm_qos_update(hba, on);
++	/*
++	 * Keep the CPU latency vote for as long as the clocks run, also with
++	 * clock scaling: at queue depth 1 the load can stay below the scale-up
++	 * threshold, and every request then waits for a CPU leaving deep idle.
++	 */
++	ufshcd_pm_qos_update(hba, on);
+ out:
+ 	if (ret) {
+ 		list_for_each_entry(clki, head, list) {
+-- 
+2.56.0
+

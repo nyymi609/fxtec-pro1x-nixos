@@ -1,0 +1,39 @@
+From: fxtec-pro1x-guix
+Subject: [PATCH] power: pro1x-charger-icl: awake_charging switch
+
+moWerk's 0040 keeps the system awake while charging (so a charge limit is
+seen in time); the author wants it optional (config.scm), as any
+behaviour change on top of what the port had.  A module parameter,
+awake_charging (default on, writable at run time); the host-port case
+(awake_on_host, 0048) is unchanged.
+
+Ours (fxtec-pro1x-guix, 2026-11-03), on top of moWerk's 0040 and 0048.
+---
+--- a/drivers/power/supply/pro1x-charger-icl.c	2026-11-03 01:10:42.316029960 +0100
++++ b/drivers/power/supply/pro1x-charger-icl.c	2026-11-03 01:10:42.338087846 +0100
+@@ -70,6 +70,15 @@
+ 
+ static bool awake_on_host = true;
+ module_param(awake_on_host, bool, 0644);
++
++/*
++ * Whether charging keeps the system awake (below); off, the phone may sleep
++ * while it charges, and a charge limit is checked at the next wake.  Set
++ * from config.scm (charging-awake?) by the pro1x-charge-limit service.
++ */
++static bool awake_charging = true;
++module_param(awake_charging, bool, 0644);
++MODULE_PARM_DESC(awake_charging, "Stay awake while charging (default on)");
+ MODULE_PARM_DESC(awake_on_host, "Stay awake while plugged into anything but a dedicated charger, so the USB gadget (developer mode, MTP) stays reachable");
+ 
+ struct pro1x_chg {
+@@ -168,7 +177,8 @@
+ 		return false;
+ 	if (awake_on_host && c->psy_desc.type != POWER_SUPPLY_TYPE_USB_DCP)
+ 		return true;
+-	return !c->user_disabled && c->last_state != CHGR_STATE_TERMINATED;
++	return awake_charging && !c->user_disabled &&
++	       c->last_state != CHGR_STATE_TERMINATED;
+ }
+ 
+ static const enum power_supply_property pro1x_usb_props[] = {

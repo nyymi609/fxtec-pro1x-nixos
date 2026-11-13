@@ -1,0 +1,53 @@
+From 20fe188249a753257b6b0f2ecdb2d599b6f4d517 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sun, 1 Nov 2026 10:03:48 +0100
+Subject: [PATCH] arm64: dts: qcom: sm6115-pro1x: switch the panel enable with
+ the panel
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+TLMM 65 is the panel's power enable: the vendor kernel drives it high
+after the panel rails and before reset, and low first at power off. In
+our DT it was only a pinctrl state, so it stayed high from the
+bootloader with the screen off. Make it the enable of the VCI supply,
+which the bf060y8m-aj0 driver turns on last and off first, the vendor
+order.
+
+On the Pro1-X, screen off, in s2idle, measured by the PMI632 fuel
+gauge: 72.9-79 mA before, 49.4 mA after.
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it after the vendor DT; built and tested on the device by the model, display checked by the author)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index 66ea921fb..349749a22 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -59,6 +59,11 @@ disp_vcc_supply: disp-vcc-supply {
+ 	disp_vci_supply: disp-vci-supply {
+ 		compatible = "regulator-fixed";
+ 		regulator-name = "disp_vci_supply";
++		gpio = <&tlmm 65 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++		pinctrl-0 = <&panel_en_n>;
++		pinctrl-names = "default";
+ 	};
+ 
+ 
+@@ -736,7 +741,7 @@ panel: panel@0 {
+ 		vci-supply = <&disp_vci_supply>;
+ 		vddio-supply = <&pm6125_l9a>;
+ 
+-		pinctrl-0 = <&mdss_dsi_n &panel_en_n>;
++		pinctrl-0 = <&mdss_dsi_n>;
+ 		pinctrl-names = "default";
+ 
+ 		port {
+-- 
+2.56.0
+

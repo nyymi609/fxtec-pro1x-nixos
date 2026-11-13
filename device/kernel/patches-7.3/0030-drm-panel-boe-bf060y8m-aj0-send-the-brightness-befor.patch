@@ -1,0 +1,46 @@
+From 266f337b5f475ef434a5c386d900c92445ea9c80 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Fri, 30 Oct 2026 03:04:53 +0100
+Subject: [PATCH] drm/panel: boe-bf060y8m-aj0: send the brightness before
+ display on
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The on sequence never set the brightness. Out of sleep the panel ran at
+its power-on level until drm_panel_enable() enabled the backlight after
+the sequence, which wrote the stored, dimmed level, and the compositor
+then faded up: every wake flashed bright, dimmed and ramped up again.
+Send the backlight's level, 0 while it is still disabled, before
+display on.
+
+Disclosure: LLMGD-0 · origin O1 (author reported the bright-dim-ramp wake, the model traced it to the on sequence and wrote the change; not yet run on the device)
+LLMGD: v0.3; assurance=A0; flags=none; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c b/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c
+index 28e88c0c0..137e7e1d8 100644
+--- a/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c
++++ b/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c
+@@ -81,6 +81,16 @@ static int boe_bf060y8m_aj0_on(struct boe_bf060y8m_aj0 *boe)
+ 
+ 	mipi_dsi_msleep(&dsi_ctx, 30);
+ 
++	/*
++	 * Out of sleep the panel runs at its power-on brightness until the
++	 * backlight is enabled after this sequence: send the backlight's
++	 * level (0 while it is still disabled) before the display goes on, so
++	 * a wake does not flash bright, dim, then ramp up.
++	 */
++	if (boe->panel.backlight)
++		mipi_dsi_dcs_set_display_brightness_multi(&dsi_ctx,
++				backlight_get_brightness(boe->panel.backlight));
++
+ 	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+ 	mipi_dsi_msleep(&dsi_ctx, 50);
+ 
+-- 
+2.56.0
+

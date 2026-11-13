@@ -1,0 +1,112 @@
+From 9944affbc391d0e3d8a1389c0a0c1ff589268184 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sat, 31 Oct 2026 18:39:28 +0100
+Subject: [PATCH 49/51] irqchip/qcom-mpm: program the vMPM wakeup timer
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The first two words of the vMPM are a wakeup timer that the RPM loads
+into the MPM before the application processor sleeps with its GIC off.
+Mainline never writes it, so in that state a pending kernel timer is
+not served until some unrelated wakeup interrupt arrives.
+
+Register the MPM domain with the CPU governor, which keeps the earliest
+hrtimer of the CPUs below it, and write that as an absolute arch timer
+count before the RPM is notified. During system suspend the kernel's
+timers are frozen and only wakeup interrupts should end the sleep, so
+the timer is left at "never" then.
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it after upstream's v1 series; built and tested on the device by the model)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=web
+---
+ drivers/irqchip/irq-qcom-mpm.c | 36 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/irqchip/irq-qcom-mpm.c b/drivers/irqchip/irq-qcom-mpm.c
+index 8c575d7ce..a6dea4d70 100644
+--- a/drivers/irqchip/irq-qcom-mpm.c
++++ b/drivers/irqchip/irq-qcom-mpm.c
+@@ -4,6 +4,7 @@
+  * Copyright (c) 2010-2020, The Linux Foundation. All rights reserved.
+  */
+ 
++#include <clocksource/arm_arch_timer.h>
+ #include <linux/delay.h>
+ #include <linux/err.h>
+ #include <linux/init.h>
+@@ -17,10 +18,13 @@
+ #include <linux/of_address.h>
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
++#include <linux/math64.h>
+ #include <linux/pm_domain.h>
+ #include <linux/slab.h>
+ #include <linux/soc/qcom/irq.h>
+ #include <linux/spinlock.h>
++#include <linux/suspend.h>
++#include <linux/timekeeping.h>
+ 
+ /*
+  * This is the driver for Qualcomm MPM (MSM Power Manager) interrupt controller,
+@@ -292,12 +296,40 @@ static irqreturn_t qcom_mpm_handler(int irq, void *dev_id)
+ 	return ret;
+ }
+ 
++/*
++ * The first two words of the vMPM are its wakeup timer, an absolute arch timer
++ * count. While the CPUs sleep with the GIC off nothing else brings them back for
++ * a kernel timer, so program the earliest hrtimer of the CPUs below this domain
++ * (the CPU governor keeps it in gd->next_hrtimer). During system suspend the
++ * kernel's timers are frozen and only wakeup interrupts count: no timer then.
++ */
++static void mpm_program_wakeup_timer(struct qcom_mpm_priv *priv)
++{
++	struct genpd_governor_data *gd = priv->genpd.gd;
++	u64 ticks = U64_MAX;
++
++	if (gd && pm_suspend_target_state == PM_SUSPEND_ON &&
++	    gd->next_hrtimer != KTIME_MAX) {
++		s64 delta = ktime_to_ns(gd->next_hrtimer) - ktime_get_mono_fast_ns();
++
++		ticks = arch_timer_read_counter();
++		if (delta > 0)
++			ticks += mul_u64_u32_div(delta, arch_timer_get_rate(),
++						 NSEC_PER_SEC);
++	}
++
++	writel_relaxed(lower_32_bits(ticks), priv->base);
++	writel_relaxed(upper_32_bits(ticks), priv->base + 4);
++}
++
+ static int mpm_pd_power_off(struct generic_pm_domain *genpd)
+ {
+ 	struct qcom_mpm_priv *priv = container_of(genpd, struct qcom_mpm_priv,
+ 						  genpd);
+ 	int i, ret;
+ 
++	mpm_program_wakeup_timer(priv);
++
+ 	for (i = 0; i < priv->reg_stride; i++)
+ 		qcom_mpm_write(priv, MPM_REG_STATUS, i, 0);
+ 
+@@ -416,14 +448,14 @@ static int qcom_mpm_probe(struct platform_device *pdev, struct device_node *pare
+ 		return irq;
+ 
+ 	genpd = &priv->genpd;
+-	genpd->flags = GENPD_FLAG_IRQ_SAFE;
++	genpd->flags = GENPD_FLAG_IRQ_SAFE | GENPD_FLAG_CPU_DOMAIN;
+ 	genpd->power_off = mpm_pd_power_off;
+ 
+ 	genpd->name = devm_kasprintf(dev, GFP_KERNEL, "%s", dev_name(dev));
+ 	if (!genpd->name)
+ 		return -ENOMEM;
+ 
+-	ret = pm_genpd_init(genpd, NULL, false);
++	ret = pm_genpd_init(genpd, &pm_domain_cpu_gov, false);
+ 	if (ret) {
+ 		dev_err(dev, "failed to init genpd: %d\n", ret);
+ 		return ret;
+-- 
+2.56.0
+

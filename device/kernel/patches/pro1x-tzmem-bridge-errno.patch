@@ -1,0 +1,58 @@
+From 90af4fb7fd80e6f20dda035126530ce985e894fa Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Wed, 11 Nov 2026 00:04:43 +0100
+Subject: [PATCH 2/4] firmware: qcom: tzmem: Return an errno when the SHM
+ bridge call is refused
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+qcom_scm_shm_bridge_create() returns the firmware's own status when the
+SMC went through but TZ refused the bridge, a positive number.
+qcom_tzmem_shm_bridge_create() passes it on as is, and documents a
+negative return. qcom_tzmem_pool_add_memory() and qcom_tzmem_pool_new()
+pass it on too, the latter as ERR_PTR(): a positive value is not an
+error pointer, so IS_ERR() clears it and the caller gets a pool pointer
+with the numeric value of the firmware status. The first
+qcom_tzmem_alloc() on that pool dereferences it.
+
+Seen on an SM6115 phone (F(x)tec Pro1X) with the out-of-tree QSEECOM TEE
+driver, which creates a pool per command: after a listener exchange that
+TZ had been told failed, the next bridge creation came back with status
+30 and the kernel oopsed in qcom_tzmem_alloc() at address 0x1e.
+
+Map a firmware status to -EIO where the bridge is created, so every
+caller sees the negative return the function promises.
+
+Fixes: f86c61498a57 ("firmware: qcom: tzmem: enable SHM Bridge support")
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it; the author tested the behaviour on the device and can verify that, not the code)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=claude-fable-5-1; retrieval=none
+---
+ drivers/firmware/qcom/qcom_tzmem.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/firmware/qcom/qcom_tzmem.c b/drivers/firmware/qcom/qcom_tzmem.c
+index f926c1f64..c94869751 100644
+--- a/drivers/firmware/qcom/qcom_tzmem.c
++++ b/drivers/firmware/qcom/qcom_tzmem.c
+@@ -143,7 +143,15 @@ int qcom_tzmem_shm_bridge_create(phys_addr_t paddr, size_t size, u64 *handle)
+ 			"SHM Bridge failed: ret %d paddr 0x%pa, size %zu\n",
+ 			ret, &paddr, size);
+ 
+-		return ret;
++		/*
++		 * When the SMC itself went through, this is the firmware's
++		 * own status, a positive number. Callers feed the return
++		 * value to ERR_PTR(), and a positive value is not an error
++		 * pointer: qcom_tzmem_pool_new() would hand it out as a pool
++		 * and the first qcom_tzmem_alloc() on it dereferences a small
++		 * integer.
++		 */
++		return ret < 0 ? ret : -EIO;
+ 	}
+ 
+ 	return 0;
+-- 
+2.56.0
+

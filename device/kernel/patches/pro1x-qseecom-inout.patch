@@ -1,0 +1,71 @@
+From fac04b1423f5d3ad85afa17b768b9ce5cf043cf3 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Wed, 11 Nov 2026 00:04:44 +0100
+Subject: [PATCH 4/4] tee: qseecom: Copy the request back when the client marks
+ it INOUT
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Android's QSEECom_send_cmd() takes separate request and response
+pointers, and clients may pass the same buffer for both. Trusted
+applications written against such a client answer in place, over the
+request: the Pro1X fingerprint application (mafp) does, and with the
+request staged in kernel memory and only the response area copied out,
+every reply it gave was lost.
+
+qseecom_tee_memref() already accepts an INOUT memref for the request.
+Give that marking a meaning: when the request parameter is INOUT, copy
+the staged request back to the client after the send, so the client sees
+what the application wrote there. INPUT requests are left untouched.
+
+Replaces the unconditional test copy of 2026-11-09 (w-73 e547c793b).
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it; the author tested the behaviour on the device and can verify that, not the code)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=claude-fable-5-1; retrieval=none
+---
+ drivers/tee/qseecom/core.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/tee/qseecom/core.c b/drivers/tee/qseecom/core.c
+index da6ac5fd6..01d4d3b1a 100644
+--- a/drivers/tee/qseecom/core.c
++++ b/drivers/tee/qseecom/core.c
+@@ -800,7 +800,7 @@ static int qseecom_tee_invoke_func(struct tee_context *ctx,
+ 	struct qseecom_tee_session *sess;
+ 	size_t req_size, rsp_size;
+ 	u32 app_gen;
+-	bool found;
++	bool found, req_inout;
+ 	void *req, *rsp;
+ 	unsigned int i;
+ 	u32 app_id;
+@@ -840,6 +840,8 @@ static int qseecom_tee_invoke_func(struct tee_context *ctx,
+ 				 &req, &req_size);
+ 	if (ret)
+ 		return ret;
++	req_inout = (param[0].attr & TEE_IOCTL_PARAM_ATTR_TYPE_MASK) ==
++		    TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT;
+ 
+ 	ret = qseecom_tee_memref(&param[1], TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_OUTPUT,
+ 				 &rsp, &rsp_size);
+@@ -954,6 +956,16 @@ static int qseecom_tee_invoke_func(struct tee_context *ctx,
+ 		if (!ret) {
+ 			memcpy(rsp, b + req_size, rsp_size);
+ 
++			/*
++			 * Android's QSEECom_send_cmd() lets a client pass one
++			 * buffer as both request and response, and trusted
++			 * applications written against that answer in place,
++			 * over the request. A client that marks the request
++			 * INOUT asks for what the application left there.
++			 */
++			if (req_inout)
++				memcpy(req, b, req_size);
++
+ 			off = PAGE_ALIGN(req_size + rsp_size);
+ 			for (k = 2; k < arg->num_params; k += 2) {
+ 				struct tee_shm *pshm = param[k + 1].u.memref.shm;
+-- 
+2.56.0
+

@@ -1,0 +1,94 @@
+From c2b8ee315b3b2a159c7de9a1297df734b791aab4 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Fri, 30 Oct 2026 15:58:44 +0100
+Subject: [PATCH 36/37] power: supply: pro1x-adc-battery: no OCV anchoring
+ while the battery relaxes after a charger
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+For a while after a charger was in, even for 30 s, the battery voltage
+stays raised by charge polarisation and the OCV estimate reads high.
+Anchored to it after the next sleep, the reading jumped up by about 12 %
+(27 % before a short charge and a sleep, 39 % after). For 20 minutes
+after the last poll with USB present the count now runs on the measured
+current only; a re-anchor that comes due meanwhile waits for the end.
+
+Disclosure: LLMGD-0 · origin O1 (the model wrote the change from the author's reading of the jump and the gauge log; not yet built)
+LLMGD: v0.3; assurance=A0; flags=none; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/power/supply/pro1x-adc-battery.c | 23 ++++++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/power/supply/pro1x-adc-battery.c b/drivers/power/supply/pro1x-adc-battery.c
+index 13298c9fb..10901e397 100644
+--- a/drivers/power/supply/pro1x-adc-battery.c
++++ b/drivers/power/supply/pro1x-adc-battery.c
+@@ -51,6 +51,7 @@
+ #define RATCHET_RELEASE		3	/* % the estimate may be off before the reading follows it back */
+ #define NOTIFY_MIN_MS		30000	/* every power_supply_changed() is a wake-up event */
+ #define PLUG_FOLLOW_MS		2000	/* re-read this soon after a plug change: the charge current ramps up */
++#define RELAX_MS		(20 * 60 * 1000)	/* after a charger: the voltage still carries polarisation */
+ #define DEFAULT_FULL_UAH	3150000
+ #define LEARN_POLLS		6
+ #define WIN			24	/* regression window: 2 minutes of samples */
+@@ -114,6 +115,8 @@ struct adc_battery {
+ 	bool status_changed;	/* the last update changed the status: notify at once */
+ 	unsigned int plug_follow;	/* after a plug change: 1 poll now, 2 the follow-up; raw current decides */
+ 	unsigned int reanchor_left;	/* polls left to re-anchor after a long sleep */
++	ktime_t last_usb_t;	/* last poll with a charger in */
++	bool had_usb;
+ 	unsigned long last_notify;
+ 
+ 	int cap;		/* reported (%), -1 until the first sample */
+@@ -257,7 +260,7 @@ static bool adc_battery_update(struct adc_battery *b)
+ 	s64 dq, est_q, dt_ms = 0, gap_ms = 0;
+ 	int new_cap;
+ 	ktime_t now;
+-	bool usb, charging, full, gap = false, long_gap = false, changed;
++	bool usb, charging, full, gap = false, long_gap = false, changed, relaxing;
+ 
+ 	if (adc_battery_read_vbat(b, &vbat) || adc_battery_read_usb(b, &usb))
+ 		return false;
+@@ -292,6 +295,18 @@ static bool adc_battery_update(struct adc_battery *b)
+ 	b->last_t = now;
+ 	b->have_t = true;
+ 
++	/*
++	 * For a while after a charger was in, even briefly, the battery voltage stays
++	 * raised by charge polarisation and the OCV estimate reads high: a 30 s charge
++	 * before a sleep lifted it by about 12 %. Until it has relaxed the count runs
++	 * on current alone; a re-anchor that came due meanwhile waits for the end.
++	 */
++	if (usb) {
++		b->last_usb_t = now;
++		b->had_usb = true;
++	}
++	relaxing = !usb && b->had_usb && ktime_ms_delta(now, b->last_usb_t) < RELAX_MS;
++
+ 	if (!b->filt_valid) {
+ 		b->v_f = vbat;
+ 		b->i_f = ibat;
+@@ -339,7 +354,9 @@ static bool adc_battery_update(struct adc_battery *b)
+ 		max_anchor_ua = charging ? ANCHOR_MAX_UA_CHG : ANCHOR_MAX_UA_DISCH;
+ 		if (charging)
+ 			b->reanchor_left = 0;
+-		if (b->reanchor_left) {
++		if (relaxing) {
++			/* count only, see above */
++		} else if (b->reanchor_left) {
+ 			/*
+ 			 * After a long sleep the count missed everything drawn meanwhile.
+ 			 * The first polls after the wake-up run under its load, so keep
+@@ -371,7 +388,7 @@ static bool adc_battery_update(struct adc_battery *b)
+ 	 * boundary cannot flip it back and forth (each change is a wake-up event).
+ 	 * A larger error is followed.
+ 	 */
+-	if (b->cap >= 0 && !long_gap && !full && new_cap != 0) {
++	if (b->cap >= 0 && (!long_gap || relaxing) && !full && new_cap != 0) {
+ 		if (charging && new_cap < b->cap && b->cap - new_cap < RATCHET_RELEASE)
+ 			new_cap = b->cap;
+ 		else if (!charging && new_cap > b->cap && new_cap - b->cap < RATCHET_RELEASE)
+-- 
+2.56.0
+

@@ -1,0 +1,93 @@
+From 4b8f726795551df9ae0bff7be29a3cd297bdeac7 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Fri, 30 Oct 2026 12:48:00 +0100
+Subject: [PATCH 34/35] misc: fastrpc: Resume an interrupted invocation instead
+ of resending it.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When a signal cuts the wait of a user invocation short (-ERESTARTSYS:
+the freezer does it to every task on system suspend), the context stays
+with the DSP and the call is restarted. The restart sent the message a
+second time. For hexagonrpcd's listener the ADSP sensor process then
+crashed in its frpc_dsp thread right at resume
+(EX:sensor_process:0x1:frpc_dsp, issue #23). A restarted call of the
+same thread with the same scalars now waits for the first message's
+answer, as the downstream adsprpc driver does
+(context_restore_interrupted).
+
+Taken from the Lenovo TB-J606L (SM6115) port: haltia-de/device-lenovo-tb-j606l
+kernel patch 0016 (commit 9838554, issue #23). On this tree the -ERESTARTSYS branch takes
+fl->lock first; the flag is set before it.
+
+Disclosure: LLMGD-0 · origin O1 (the model took the J606L port's patch and placed one line by hand; not yet run on this device)
+LLMGD: v0.3; assurance=A0; flags=none; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/misc/fastrpc.c | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/drivers/misc/fastrpc.c b/drivers/misc/fastrpc.c
+index e68c3d433..ded183f7b 100644
+--- a/drivers/misc/fastrpc.c
++++ b/drivers/misc/fastrpc.c
+@@ -286,6 +286,8 @@ struct fastrpc_invoke_ctx {
+ 	struct fastrpc_invoke_args *args;
+ 	struct fastrpc_buf_overlap *olaps;
+ 	struct fastrpc_channel_ctx *cctx;
++	/* Its wait was cut short by a signal; the DSP still owns it. */
++	bool interrupted;
+ };
+ 
+ struct fastrpc_session_ctx {
+@@ -1373,6 +1375,31 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
+ 		return -EPERM;
+ 	}
+ 
++	/*
++	 * A call interrupted by a signal (the freezer, on system suspend) is
++	 * restarted with the same arguments. The DSP still holds the first
++	 * message: wait for its answer again instead of sending it twice,
++	 * which crashed the ADSP sensor process at resume.
++	 */
++	if (!kernel) {
++		struct fastrpc_invoke_ctx *ictx;
++
++		spin_lock(&fl->lock);
++		list_for_each_entry(ictx, &fl->pending, node) {
++			if (ictx->interrupted && ictx->pid == current->pid) {
++				if (ictx->sc == sc) {
++					ictx->interrupted = false;
++					ictx->args = args;
++					ctx = ictx;
++				}
++				break;
++			}
++		}
++		spin_unlock(&fl->lock);
++		if (ctx)
++			goto wait;
++	}
++
+ 	ctx = fastrpc_context_alloc(fl, kernel, sc, args);
+ 	if (IS_ERR(ctx))
+ 		return PTR_ERR(ctx);
+@@ -1388,6 +1415,7 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
+ 	if (err)
+ 		goto bail;
+ 
++wait:
+ 	/*
+ 	 * Set message context as polled if the call is for a user PD
+ 	 * dynamic module and user has enabled poll mode.
+@@ -1421,6 +1449,7 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
+ 	}
+ 
+ 	if (err == -ERESTARTSYS) {
++		ctx->interrupted = true;
+ 		spin_lock(&fl->lock);
+ 		list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
+ 			list_del(&buf->node);
+-- 
+2.56.0
+

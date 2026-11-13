@@ -1,0 +1,74 @@
+From 0b5ddf13f1262273515612f2299fcaddc824ad24 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Mon, 26 Oct 2026 14:24:17 +0100
+Subject: [PATCH 14/16] sfos-imx582-1080p
+
+SailfishOS build only (applied after pro1x-camera): widen the IMX582 1080p mode to
+1984x1080.
+
+libcamera's software ISP keeps a border of one Bayer pattern (4 pixels for 10-bit packed
+RAW) on the left and right, so a 1920x1080 sensor mode yields at most 1912x1080 and a
+1920x1080 stream falls back to the 4000x3000 mode (24 fps sensor limit, 12 MP CPU debayer,
+about 6 fps video in jolla-camera). The 4x4 binned readout is already 2000 pixels wide;
+only the digital crop changes (X offset 40 -> 8, width 1920 -> 1984, a 16-byte aligned
+packed stride). HTS 2912 -> 3040 keeps the per-line CSI-2 slack at least as large as
+before with the wider line (mode maximum about 92 fps instead of 96).
+
+
+LLMGD-0 A0
+---
+ drivers/media/i2c/imx582.c | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/media/i2c/imx582.c b/drivers/media/i2c/imx582.c
+index 2cd104b62..0dfe7acbd 100644
+--- a/drivers/media/i2c/imx582.c
++++ b/drivers/media/i2c/imx582.c
+@@ -914,7 +914,7 @@ static const struct cci_reg_sequence imx582_mode_1920x1080_regs[] = {
+ 	{ CCI_REG8(0x0113), 0x0a },
+ 	{ CCI_REG8(0x0114), 0x03 },
+ 	{ CCI_REG8(0x0342), 0x0b },
+-	{ CCI_REG8(0x0343), 0x60 },
++	{ CCI_REG8(0x0343), 0xe0 },
+ 	{ CCI_REG8(0x0340), 0x04 },
+ 	{ CCI_REG8(0x0341), 0x7e },
+ 	{ CCI_REG8(0x0344), 0x00 },
+@@ -934,15 +934,15 @@ static const struct cci_reg_sequence imx582_mode_1920x1080_regs[] = {
+ 	{ CCI_REG8(0x0404), 0x00 },
+ 	{ CCI_REG8(0x0405), 0x10 },
+ 	{ CCI_REG8(0x0408), 0x00 },
+-	{ CCI_REG8(0x0409), 0x28 },
++	{ CCI_REG8(0x0409), 0x08 },
+ 	{ CCI_REG8(0x040a), 0x00 },
+ 	{ CCI_REG8(0x040b), 0x00 },
+ 	{ CCI_REG8(0x040c), 0x07 },
+-	{ CCI_REG8(0x040d), 0x80 },
++	{ CCI_REG8(0x040d), 0xc0 },
+ 	{ CCI_REG8(0x040e), 0x04 },
+ 	{ CCI_REG8(0x040f), 0x38 },
+ 	{ CCI_REG8(0x034c), 0x07 },
+-	{ CCI_REG8(0x034d), 0x80 },
++	{ CCI_REG8(0x034d), 0xc0 },
+ 	{ CCI_REG8(0x034e), 0x04 },
+ 	{ CCI_REG8(0x034f), 0x38 },
+ 	{ CCI_REG8(0x0301), 0x05 },
+@@ -1035,13 +1035,13 @@ static const struct imx582_mode imx582_modes[] = {
+ 		.reg_list = { .num_of_regs = ARRAY_SIZE(imx582_mode_4000x3000_regs), .regs = imx582_mode_4000x3000_regs },
+ 	},
+ 	{
+-		.width = 1920,
++		.width = 1984,
+ 		.height = 1080,
+-		.hts = 2912,
++		.hts = 3040,
+ 		.vts_def = 1150,
+ 		.pixel_rate = 321600000,
+ 		.link_freq_idx = 1,
+-		.crop = { .left = 160, .top = 832, .width = 7680, .height = 4320 },
++		.crop = { .left = 32, .top = 832, .width = 7936, .height = 4320 },
+ 		.reg_list = { .num_of_regs = ARRAY_SIZE(imx582_mode_1920x1080_regs), .regs = imx582_mode_1920x1080_regs },
+ 	},
+ };
+-- 
+2.56.0
+

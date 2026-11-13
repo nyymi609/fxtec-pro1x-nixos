@@ -1,0 +1,65 @@
+From d79ecf3d51ae637d49b9fc263c62e898a36e4640 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Wed, 28 Oct 2026 18:20:06 +0100
+Subject: [PATCH 1/2] aw87339: power the amplifier up last and down first
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The amplifier was a PGA switched on in PRE_PMU and off in POST_PMD, so
+it amplified the codec's power-up and power-down transients: a loud pop
+on the speaker whenever the card powered up or down (boot, notification
+sounds, idle suspend). As a speaker widget it is sequenced after the
+codec's output drivers on power-up and before them on power-down, and
+it switches in POST_PMU / PRE_PMD; 10 ms after the power-down write
+before the enable line drops. The power-up pop is gone on the Pro1-X;
+a pop at card teardown (boot reprobe) remains.
+
+Disclosure: LLMGD-2 · origin O1 (author set the goal, the model wrote the code; exercised on the device)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=sound/soc/codecs/aw87339.c; graded-by=model; retrieval=none
+---
+ sound/soc/codecs/aw87339.c | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/sound/soc/codecs/aw87339.c b/sound/soc/codecs/aw87339.c
+index 714b35c96..a61077078 100644
+--- a/sound/soc/codecs/aw87339.c
++++ b/sound/soc/codecs/aw87339.c
+@@ -59,7 +59,7 @@ static int aw87339_event(struct snd_soc_dapm_widget *w,
+ 
+ 	mutex_lock(&aw->lock);
+ 	switch (event) {
+-	case SND_SOC_DAPM_PRE_PMU:
++	case SND_SOC_DAPM_POST_PMU:
+ 		gpiod_set_value_cansleep(aw->enable, 1);
+ 		usleep_range(2000, 3000);
+ 		ret = regmap_multi_reg_write(aw->regmap, aw87339_music_seq,
+@@ -67,8 +67,9 @@ static int aw87339_event(struct snd_soc_dapm_widget *w,
+ 		if (ret)
+ 			dev_err(component->dev, "enable sequence failed: %d\n", ret);
+ 		break;
+-	case SND_SOC_DAPM_POST_PMD:
++	case SND_SOC_DAPM_PRE_PMD:
+ 		regmap_write(aw->regmap, AW87339_REG_SYSCTRL, AW87339_PWR_DOWN);
++		usleep_range(10000, 12000);	/* let the output stage ramp down */
+ 		gpiod_set_value_cansleep(aw->enable, 0);
+ 		break;
+ 	}
+@@ -79,8 +80,12 @@ static int aw87339_event(struct snd_soc_dapm_widget *w,
+ 
+ static const struct snd_soc_dapm_widget aw87339_dapm_widgets[] = {
+ 	SND_SOC_DAPM_INPUT("IN"),
+-	SND_SOC_DAPM_PGA_E("SPK PA", SND_SOC_NOPM, 0, 0, NULL, 0, aw87339_event,
+-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
++	/*
++	 * Anti-pop: as a speaker widget the amplifier is powered up last and down first.
++	 * It switches on once the codec output has settled (POST_PMU) and off before the
++	 * codec powers down (PRE_PMD), so it never amplifies the codec's power transients.
++	 */
++	SND_SOC_DAPM_SPK("SPK PA", aw87339_event),
+ 	SND_SOC_DAPM_OUTPUT("OUT"),
+ };
+ 
+-- 
+2.56.0
+

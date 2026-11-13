@@ -1,0 +1,100 @@
+From 2669424f218ca57b09cca17128783548f29ac3f0 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Wed, 28 Oct 2026 19:16:43 +0100
+Subject: [PATCH] arm64: dts: qcom: sm6115: vote GPU memory bandwidth
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Adreno 610 node had no interconnect path and its OPPs no bandwidth,
+so the GPU never voted for DDR bandwidth (qnm_gpu 0/0) and ran at what
+the CPU and display happened to request. Add the GFX3D -> EBI path and
+per-OPP peak bandwidth following agatti (QCM2290): 1.72, 2.93, 3.88 and
+6.88 GB/s.
+
+Benchymark on the F(x)tec Pro1-X, fixed load, 3 runs each, fresh boot:
+Benchy large 13389 -> 16690 (+25 %, stable instead of dropping after
+the first run), Overdraw 1288 -> 1769 (+37 %), Shader light 63.0 ->
+68.3 (+8 %), Icon storm 30353 -> 32313 (+6 %), Shader heavy unchanged.
+
+Disclosure: LLMGD-2 · origin O1 (author set the goal, the model wrote the code; exercised on the device)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=arch/arm64/boot/dts/qcom/sm6115.dtsi; graded-by=model; retrieval=none
+---
+ arch/arm64/boot/dts/qcom/sm6115.dtsi | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115.dtsi b/arch/arm64/boot/dts/qcom/sm6115.dtsi
+index 69027d551..791a38f92 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6115.dtsi
+@@ -1816,6 +1816,9 @@ gpu: gpu@5900000 {
+ 			interrupts = <GIC_SPI 177 IRQ_TYPE_LEVEL_HIGH>;
+ 
+ 			iommus = <&adreno_smmu 0 1>;
++			interconnects = <&bimc MASTER_GRAPHICS_3D RPM_ALWAYS_TAG
++					 &bimc SLAVE_EBI_CH0 RPM_ALWAYS_TAG>;
++			interconnect-names = "gfx-mem";
+ 			operating-points-v2 = <&gpu_opp_table>;
+ 			power-domains = <&rpmpd SM6115_VDDCX>;
+ 			qcom,gmu = <&gmu_wrapper>;
+@@ -1835,36 +1838,42 @@ gpu_opp_table: opp-table {
+ 
+ 				opp-320000000 {
+ 					opp-hz = /bits/ 64 <320000000>;
++					opp-peak-kBps = <1720000>;
+ 					required-opps = <&rpmpd_opp_low_svs>;
+ 					opp-supported-hw = <0x1f>;
+ 				};
+ 
+ 				opp-465000000 {
+ 					opp-hz = /bits/ 64 <465000000>;
++					opp-peak-kBps = <2929000>;
+ 					required-opps = <&rpmpd_opp_svs>;
+ 					opp-supported-hw = <0x1f>;
+ 				};
+ 
+ 				opp-600000000 {
+ 					opp-hz = /bits/ 64 <600000000>;
++					opp-peak-kBps = <3879000>;
+ 					required-opps = <&rpmpd_opp_svs_plus>;
+ 					opp-supported-hw = <0x1f>;
+ 				};
+ 
+ 				opp-745000000 {
+ 					opp-hz = /bits/ 64 <745000000>;
++					opp-peak-kBps = <6881000>;
+ 					required-opps = <&rpmpd_opp_nom>;
+ 					opp-supported-hw = <0xf>;
+ 				};
+ 
+ 				opp-820000000 {
+ 					opp-hz = /bits/ 64 <820000000>;
++					opp-peak-kBps = <6881000>;
+ 					required-opps = <&rpmpd_opp_nom_plus>;
+ 					opp-supported-hw = <0x7>;
+ 				};
+ 
+ 				opp-900000000 {
+ 					opp-hz = /bits/ 64 <900000000>;
++					opp-peak-kBps = <6881000>;
+ 					required-opps = <&rpmpd_opp_turbo>;
+ 					opp-supported-hw = <0x7>;
+ 				};
+@@ -1872,12 +1881,14 @@ opp-900000000 {
+ 				/* Speed bin 2 can reach 950 Mhz instead of 980 like the rest. */
+ 				opp-950000000 {
+ 					opp-hz = /bits/ 64 <950000000>;
++					opp-peak-kBps = <6881000>;
+ 					required-opps = <&rpmpd_opp_turbo_plus>;
+ 					opp-supported-hw = <0x4>;
+ 				};
+ 
+ 				opp-980000000 {
+ 					opp-hz = /bits/ 64 <980000000>;
++					opp-peak-kBps = <6881000>;
+ 					required-opps = <&rpmpd_opp_turbo_plus>;
+ 					opp-supported-hw = <0x3>;
+ 				};
+-- 
+2.56.0
+

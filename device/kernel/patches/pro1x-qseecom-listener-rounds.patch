@@ -1,0 +1,116 @@
+From c745dd5f330a91804d96922be87386a7c14e32a3 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Wed, 11 Nov 2026 00:04:44 +0100
+Subject: [PATCH 3/4] firmware: qcom: scm: qseecom: Bound failed listener
+ rounds, not served ones
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The listener loop gave up on a command after 256 rounds, counting every
+request the supplicant served as a round. An application that needs more
+than that for one command is not stuck, it is working: the Pro1X
+fingerprint application reads its template store through the FS
+listener in 20 KB pieces, 49 requests per 968704-byte slot file, and its
+set-active-group command with five slots on file ran past the cap. The
+loop then told TZ the request failed, the application errored out
+parked, and the next command found the interface refusing SHM bridges.
+
+Count only requests that were not served, consecutively, and reset the
+count on every served one. Sixteen failed requests in a row from one
+command is a loop; a supplicant that times out ten seconds each is still
+bounded by that at under three minutes with the call lock held.
+
+The answer to TZ is sent before giving up, as before, so the application
+is never left waiting.
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it; the author tested the behaviour on the device and can verify that, not the code)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=claude-fable-5-1; retrieval=none
+---
+ drivers/firmware/qcom/qcom_scm.c | 48 +++++++++++++++++---------------
+ 1 file changed, 25 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/firmware/qcom/qcom_scm.c b/drivers/firmware/qcom/qcom_scm.c
+index 0909b883e..dce27f934 100644
+--- a/drivers/firmware/qcom/qcom_scm.c
++++ b/drivers/firmware/qcom/qcom_scm.c
+@@ -2129,10 +2129,13 @@ static LIST_HEAD(qcom_scm_qseecom_listeners);
+ 
+ /*
+  * An app that keeps asking for service without ever making progress would
+- * otherwise spin here forever with the call lock held. The real bound is set
+- * by the app; this only stops a broken one from taking the machine with it.
++ * otherwise spin here forever with the call lock held. Progress is a request
++ * the listener served: how many of those one command needs is the app's
++ * business (a fingerprint app reads its template store in 20 KB pieces, a
++ * few hundred requests for a handful of files). Only requests that keep
++ * failing are a loop, and this bounds those.
+  */
+-#define QSEECOM_MAX_LISTENER_ROUNDS		256
++#define QSEECOM_MAX_FAILED_ROUNDS		16
+ 
+ static struct qcom_scm_qseecom_listener *qcom_scm_qseecom_listener_find(u32 id)
+ {
+@@ -2224,26 +2227,6 @@ static int qcom_scm_qseecom_service_listeners(struct qcom_scm_qseecom_resp *res)
+ 
+ 		id = res->data;
+ 
+-		if (++rounds > QSEECOM_MAX_LISTENER_ROUNDS) {
+-			/*
+-			 * Answer failure before giving up. The application is
+-			 * parked in TZ waiting for this listener, and leaving
+-			 * it there makes every later QSEECOM call return
+-			 * -EBUSY until the device is power cycled -- so tell
+-			 * it the request failed and let it error out instead.
+-			 */
+-			dev_err(__scm->dev,
+-				"qseecom: listener %u will not settle, failing it\n",
+-				id);
+-			ret = qcom_scm_qseecom_listener_respond(id,
+-					QSEECOM_LISTENER_FAILURE, res);
+-			if (ret)
+-				dev_err(__scm->dev,
+-					"qseecom: could not fail listener %u (%d); the application stays parked and the interface is stuck until reboot\n",
+-					id, ret);
+-			return -ELOOP;
+-		}
+-
+ 		listener = qcom_scm_qseecom_listener_find(id);
+ 		if (listener) {
+ 			status = listener->service(listener);
+@@ -2254,6 +2237,18 @@ static int qcom_scm_qseecom_service_listeners(struct qcom_scm_qseecom_resp *res)
+ 			status = QSEECOM_LISTENER_FAILURE;
+ 		}
+ 
++		if (status == QSEECOM_LISTENER_SUCCESS)
++			rounds = 0;
++		else
++			rounds++;
++
++		/*
++		 * The answer goes to TZ in any case. The application is parked
++		 * there waiting for it, and leaving it unanswered makes every
++		 * later QSEECOM call return -EBUSY until the device is power
++		 * cycled -- so even when giving up below, tell it the request
++		 * failed and let it error out instead.
++		 */
+ 		ret = qcom_scm_qseecom_listener_respond(id, status, res);
+ 		if (ret) {
+ 			dev_err(__scm->dev,
+@@ -2261,6 +2256,13 @@ static int qcom_scm_qseecom_service_listeners(struct qcom_scm_qseecom_resp *res)
+ 				id, ret);
+ 			return ret;
+ 		}
++
++		if (rounds > QSEECOM_MAX_FAILED_ROUNDS) {
++			dev_err(__scm->dev,
++				"qseecom: listener %u failed %u requests in a row, giving up on the command\n",
++				id, rounds);
++			return -ELOOP;
++		}
+ 	}
+ 
+ 	/*
+-- 
+2.56.0
+

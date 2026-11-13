@@ -249,7 +249,7 @@ new file mode 100644
 index 000000000..e47fd108f
 --- /dev/null
 +++ b/drivers/input/keyboard/pro1x-aw9523-kbd.c
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,451 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * F(x)tec Pro1X keyboard: 8x8 matrix behind an Awinic AW9523B I2C expander
@@ -307,8 +307,11 @@ index 000000000..e47fd108f
 +#define AW_SOFT_RESET	0x7f
 +
 +#define NUM_LINES	8
-+#define POLL_MS		15
 +#define SCAN_RETRIES	10
++
++static unsigned int poll_ms = 5;
++module_param(poll_ms, uint, 0644);
++MODULE_PARM_DESC(poll_ms, "Delay between scans while a key is held (ms)");
 +
 +static unsigned int settle_us = 20;
 +module_param(settle_us, uint, 0644);
@@ -485,7 +488,7 @@ index 000000000..e47fd108f
 +	struct device *dev = &kb->client->dev;
 +	u8 state[NUM_LINES];
 +	u8 keymask = 0;
-+	int i, ret;
++	int i, ret, rows;
 +
 +	ret = kbd_scan(kb, state);
 +	if (ret) {
@@ -504,12 +507,17 @@ index 000000000..e47fd108f
 +	/* Back to the idle configuration and clear the pending INT. */
 +	if (kbd_idle_config(kb))
 +		dev_err_ratelimited(dev, "failed to restore idle config\n");
-+	kbd_read(kb, AW_INPUT_P0);
++	rows = kbd_read(kb, AW_INPUT_P0);
 +	kbd_read(kb, AW_INPUT_P1);
 +
-+	if (keymask) {
++	/*
++	 * A key pressed after its column was scanned pulled a row low before
++	 * the read above cleared INT, so no interrupt will announce it.  With
++	 * every column driven low, any held key shows on the rows.
++	 */
++	if (keymask || (rows >= 0 && (u8)rows != 0xff)) {
 +		/* Poll while a key is held, the IRQ stays masked. */
-+		schedule_delayed_work(&kb->work, msecs_to_jiffies(POLL_MS));
++		schedule_delayed_work(&kb->work, msecs_to_jiffies(poll_ms));
 +		return;
 +	}
 +

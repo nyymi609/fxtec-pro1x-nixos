@@ -1,0 +1,226 @@
+From 9fcf088a451e41563de9970352d4d0e75a5e5701 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Thu, 29 Oct 2026 22:15:28 +0100
+Subject: [PATCH] pro1x power: report plug changes at once, battery event first
+ on unplug
+
+SailfishOS showed the charging notification and played its sound on
+the unplug, and never on the plug-in. mce counts a charger as connected
+while any charger is online or the battery says Charging; usb-moded
+reacts to the "usb" supply at once. The battery's events came late and
+after the usb supply's, so lipstick saw "charging, no USB mode" on the
+unplug for 60-180 ms.
+
+Battery (pro1x-adc-battery):
+- USB presence from the charger supply (power_supply_am_i_supplied)
+  instead of the USBIN voltage, which decays for seconds after unplug.
+- On external_power_changed with no supply: Discharging at once,
+  without the ADC.
+- Status changes are notified at once; only capacity changes keep the
+  30 s rate limit.
+- After a plug change, poll again after 2 s and let the raw current
+  decide "charging" (the filter lags).
+- VOLTAGE_NOW returns the filtered value: a uevent no longer waits for
+  the ADC behind a poll. The poll after a plug change starts 200 ms
+  later.
+
+Charger (pro1x-charger-icl): on unplug, notify the battery first and
+emit the usb supply's change 30 ms later.
+
+Tested: seven unplugs in a row silent, plug-ins with the charging
+notification and sound.
+---
+ drivers/power/supply/pro1x-adc-battery.c | 78 ++++++++++++++++++++----
+ drivers/power/supply/pro1x-charger-icl.c | 17 ++++++
+ 2 files changed, 84 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/power/supply/pro1x-adc-battery.c b/drivers/power/supply/pro1x-adc-battery.c
+index bc96b8dd2..13298c9fb 100644
+--- a/drivers/power/supply/pro1x-adc-battery.c
++++ b/drivers/power/supply/pro1x-adc-battery.c
+@@ -50,6 +50,7 @@
+ #define GAP_MAX_CHARGE_MS	(12 * 3600 * 1000LL)	/* longest suspend credited with charge */
+ #define RATCHET_RELEASE		3	/* % the estimate may be off before the reading follows it back */
+ #define NOTIFY_MIN_MS		30000	/* every power_supply_changed() is a wake-up event */
++#define PLUG_FOLLOW_MS		2000	/* re-read this soon after a plug change: the charge current ramps up */
+ #define DEFAULT_FULL_UAH	3150000
+ #define LEARN_POLLS		6
+ #define WIN			24	/* regression window: 2 minutes of samples */
+@@ -110,6 +111,8 @@ struct adc_battery {
+ 	ktime_t last_t;
+ 	bool have_t;
+ 	bool notify_pending;
++	bool status_changed;	/* the last update changed the status: notify at once */
++	unsigned int plug_follow;	/* after a plug change: 1 poll now, 2 the follow-up; raw current decides */
+ 	unsigned int reanchor_left;	/* polls left to re-anchor after a long sleep */
+ 	unsigned long last_notify;
+ 
+@@ -179,6 +182,16 @@ static int adc_battery_read_usb(struct adc_battery *b, bool *usb)
+ {
+ 	int usbin, ret;
+ 
++	/*
++	 * The charger's "usb" supply knows at once; the USBIN voltage decays for a few
++	 * seconds after an unplug and still read as present then.
++	 */
++	ret = b->psy ? power_supply_am_i_supplied(b->psy) : -ENODEV;
++	if (ret >= 0) {
++		*usb = ret > 0;
++		return 0;
++	}
++
+ 	ret = adc_read_uv(b->usbin, &usbin);
+ 	if (ret)
+ 		return ret;
+@@ -306,7 +319,9 @@ static bool adc_battery_update(struct adc_battery *b)
+ 	}
+ 	est = clamp(est, 0, 100);
+ 	est_q = div_s64((s64)est * b->q_full_uah, 100);
+-	charging = usb && b->i_f < -CHARGING_MIN_UA;
++	/* Right after a plug change the filter lags: the raw current decides as well. */
++	charging = usb && (b->i_f < -CHARGING_MIN_UA ||
++			   (b->plug_follow && ibat < -CHARGING_MIN_UA));
+ 	full = usb && b->v_f >= (int)b->full_uv;
+ 
+ 	if (!b->have_q) {
+@@ -369,7 +384,8 @@ static bool adc_battery_update(struct adc_battery *b)
+ 		dev_info(b->dev, "v=%d uV i=%d uA esr=%u mOhm ocv=%d uV est=%d%% q=%lld uAh cap=%d%% usb=%d gap=%lldms\n",
+ 			 vbat, ibat, esr_mohm, ocv, est, b->q_uah, b->cap, usb, gap ? gap_ms : 0LL);
+ 
+-	changed = (b->cap != old_cap) || (b->status != old_status);
++	b->status_changed = b->status != old_status;
++	changed = (b->cap != old_cap) || b->status_changed;
+ 	mutex_unlock(&b->lock);
+ 	return changed;
+ }
+@@ -379,7 +395,7 @@ static int adc_battery_get_property(struct power_supply *psy,
+ 				    union power_supply_propval *val)
+ {
+ 	struct adc_battery *b = power_supply_get_drvdata(psy);
+-	int vbat, cap, status, ocv, ibat, ret;
++	int vbat, cap, status, ocv, ibat;
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_PRESENT:
+@@ -403,15 +419,18 @@ static int adc_battery_get_property(struct power_supply *psy,
+ 	status = b->status;
+ 	ocv = b->ocv_uv;
+ 	ibat = b->i_f;
++	vbat = b->v_f;
+ 	mutex_unlock(&b->lock);
+ 	if (cap < 0)
+ 		return -ENODATA;
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+-		ret = adc_battery_read_vbat(b, &vbat);
+-		if (ret)
+-			return ret;
++		/*
++		 * The filtered value of the last poll: no ADC read here, so a uevent
++		 * (which reads every property) goes out at once, also while a poll
++		 * holds the ADC.
++		 */
+ 		val->intval = vbat;
+ 		break;
+ 	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
+@@ -461,9 +480,34 @@ static const enum power_supply_property adc_battery_props[] = {
+ static void adc_battery_external_power_changed(struct power_supply *psy)
+ {
+ 	struct adc_battery *b = power_supply_get_drvdata(psy);
++	bool unplugged = false;
++
++	if (!b || !READ_ONCE(b->ready))
++		return;
+ 
+-	if (b && READ_ONCE(b->ready))
+-		mod_delayed_work(system_wq, &b->work, 0);
++	/*
++	 * An unplug is known now, without the ADC: report Discharging in the same
++	 * moment as the charger's own event. Userspace that combines the two (mce,
++	 * lipstick's charging notification after a 100 ms settle) otherwise sees
++	 * "charger gone, still charging" and announces charging on the unplug.
++	 */
++	if (power_supply_am_i_supplied(psy) == 0) {
++		mutex_lock(&b->lock);
++		if (b->status != POWER_SUPPLY_STATUS_DISCHARGING &&
++		    b->status != POWER_SUPPLY_STATUS_UNKNOWN) {
++			b->status = POWER_SUPPLY_STATUS_DISCHARGING;
++			unplugged = true;
++		}
++		mutex_unlock(&b->lock);
++		if (unplugged) {
++			b->last_notify = jiffies;
++			power_supply_changed(psy);
++		}
++	}
++
++	WRITE_ONCE(b->plug_follow, 1);
++	/* let the uevents of the plug change go out before the ADC gets busy */
++	mod_delayed_work(system_wq, &b->work, msecs_to_jiffies(200));
+ }
+ 
+ static const struct power_supply_desc adc_battery_desc = {
+@@ -479,16 +523,28 @@ static void adc_battery_poll(struct work_struct *work)
+ {
+ 	struct adc_battery *b = container_of(work, struct adc_battery, work.work);
+ 
++	unsigned int next = POLL_MS;
++
+ 	if (adc_battery_update(b))
+ 		b->notify_pending = true;
+-	/* power_supply_changed() is a wake-up event: keep it rare */
++	/*
++	 * power_supply_changed() is a wake-up event: keep capacity updates rare, but a
++	 * status change (plug, unplug, charging, full) goes out at once.
++	 */
+ 	if (b->notify_pending &&
+-	    time_after(jiffies, b->last_notify + msecs_to_jiffies(NOTIFY_MIN_MS))) {
++	    (b->status_changed ||
++	     time_after(jiffies, b->last_notify + msecs_to_jiffies(NOTIFY_MIN_MS)))) {
+ 		b->notify_pending = false;
+ 		b->last_notify = jiffies;
+ 		power_supply_changed(b->psy);
+ 	}
+-	schedule_delayed_work(&b->work, msecs_to_jiffies(POLL_MS));
++	if (b->plug_follow) {
++		/* first poll after the plug change: one more soon; after that, normal */
++		if (b->plug_follow == 1)
++			next = PLUG_FOLLOW_MS;
++		b->plug_follow = b->plug_follow == 1 ? 2 : 0;
++	}
++	schedule_delayed_work(&b->work, msecs_to_jiffies(next));
+ }
+ 
+ /* No polling while the system sleeps; the first poll after resume re-anchors the count. */
+diff --git a/drivers/power/supply/pro1x-charger-icl.c b/drivers/power/supply/pro1x-charger-icl.c
+index ddf4cbe15..161ab21a8 100644
+--- a/drivers/power/supply/pro1x-charger-icl.c
++++ b/drivers/power/supply/pro1x-charger-icl.c
+@@ -158,6 +158,23 @@ static void pro1x_usb_update(struct pro1x_chg *c, bool was_present, unsigned int
+ 		t = POWER_SUPPLY_TYPE_USB_CDP;
+ 	if (was_present != c->present || t != c->psy_desc.type) {
+ 		c->psy_desc.type = t;
++		/*
++		 * On an unplug the battery reports Discharging first: mce counts the
++		 * charger as connected while the battery still says Charging, and
++		 * usb-moded reacts to this supply at once, so with the battery's event
++		 * second lipstick briefly saw "charging, no USB mode" and announced
++		 * charging on the unplug. Both events go out from work items, so give
++		 * the battery's a head start (this runs in the poll work anyway).
++		 */
++		if (was_present && !c->present) {
++			struct power_supply *bat = power_supply_get_by_name("battery");
++
++			if (bat) {
++				power_supply_external_power_changed(bat);
++				power_supply_put(bat);
++				msleep(30);
++			}
++		}
+ 		power_supply_changed(c->psy);
+ 	}
+ }
+-- 
+2.56.0
+

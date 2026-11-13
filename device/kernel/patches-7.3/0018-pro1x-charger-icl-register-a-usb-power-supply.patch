@@ -1,0 +1,126 @@
+From 26f49afedec656ed4b49949acbd5bb939b2a2127 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Wed, 28 Oct 2026 17:22:06 +0100
+Subject: [PATCH] pro1x-charger-icl: register a "usb" power supply
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+usb-moded and mce detect the cable through /sys/class/power_supply/usb:
+online follows the PMIC's USB input (POWER_PATH_STATUS USE_USBIN), and
+the type follows the charger detection (APSD): USB for a PC port, USB_DCP
+for a wall charger or QC adapter, USB_CDP for a charging port. The
+Type-C port's tcpm supply does not report a PC host as online.
+
+Disclosure: LLMGD-2 · origin O1 (author set the goal, the model wrote the code; exercised on the device)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=drivers/power/supply/pro1x-charger-icl.c; graded-by=model; retrieval=none
+---
+ drivers/power/supply/pro1x-charger-icl.c | 53 ++++++++++++++++++++++++
+ 1 file changed, 53 insertions(+)
+
+diff --git a/drivers/power/supply/pro1x-charger-icl.c b/drivers/power/supply/pro1x-charger-icl.c
+index be9854d25..79fc2ff27 100644
+--- a/drivers/power/supply/pro1x-charger-icl.c
++++ b/drivers/power/supply/pro1x-charger-icl.c
+@@ -17,6 +17,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/power_supply.h>
+ #include <linux/regmap.h>
+ #include <linux/workqueue.h>
+ 
+@@ -72,6 +73,8 @@ struct pro1x_chg {
+ 	bool present;
+ 	bool recovered;
+ 	bool user_disabled;	/* charging switched off through charging_enabled */
++	struct power_supply *psy;	/* "usb": cable state for usb-moded and mce */
++	struct power_supply_desc psy_desc;
+ 	int last_state;
+ 	unsigned int last_apsd, last_snk, last_icl;
+ };
+@@ -124,10 +127,46 @@ static void pro1x_chg_apply(struct pro1x_chg *c, unsigned int ma)
+ 		 before, ma, after);
+ }
+ 
++static const enum power_supply_property pro1x_usb_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++};
++
++static int pro1x_usb_get_property(struct power_supply *psy, enum power_supply_property psp,
++				  union power_supply_propval *val)
++{
++	struct pro1x_chg *c = power_supply_get_drvdata(psy);
++
++	if (psp != POWER_SUPPLY_PROP_ONLINE)
++		return -EINVAL;
++	val->intval = c->present;
++	return 0;
++}
++
++/*
++ * usb-moded tells a PC from a wall charger by the supply type (USB, USB_DCP, USB_CDP), so
++ * the type follows the charger detection (APSD) of the current plug-in.
++ */
++static void pro1x_usb_update(struct pro1x_chg *c, bool was_present, unsigned int apsd)
++{
++	enum power_supply_type t = POWER_SUPPLY_TYPE_USB;
++
++	if (!c->psy)
++		return;
++	if (c->present && (apsd & (APSD_DCP | APSD_QC2 | APSD_QC3)))
++		t = POWER_SUPPLY_TYPE_USB_DCP;
++	else if (c->present && (apsd & APSD_CDP))
++		t = POWER_SUPPLY_TYPE_USB_CDP;
++	if (was_present != c->present || t != c->psy_desc.type) {
++		c->psy_desc.type = t;
++		power_supply_changed(c->psy);
++	}
++}
++
+ static void pro1x_chg_work(struct work_struct *w)
+ {
+ 	struct pro1x_chg *c = container_of(to_delayed_work(w), struct pro1x_chg, work);
+ 	unsigned int pp = 0, apsd = 0, snk = 0, want, icl;
++	bool was_present = c->present;
+ 
+ 	if (rd(c, POWER_PATH_STATUS, &pp))
+ 		goto out;
+@@ -136,6 +175,7 @@ static void pro1x_chg_work(struct work_struct *w)
+ 		if (c->present)
+ 			dev_dbg(c->dev, "input removed\n");
+ 		c->present = false;
++		pro1x_usb_update(c, was_present, 0);
+ 		c->applied_ma = 0;
+ 		c->recovered = false;
+ 		c->last_state = -1;
+@@ -151,6 +191,7 @@ static void pro1x_chg_work(struct work_struct *w)
+ 		dev_info(c->dev, "input in: apsd 0x%02x, typec-snk 0x%02x, limit %u mA\n",
+ 			 apsd, snk, icl);
+ 	c->present = true;
++	pro1x_usb_update(c, was_present, apsd);
+ 	c->last_apsd = apsd;
+ 	c->last_snk = snk;
+ 	c->last_icl = icl;
+@@ -255,6 +296,18 @@ static int pro1x_chg_probe(struct platform_device *pdev)
+ 	dev_info(dev, "watchdog cfg 0x%02x, snarl/bark/bite 0x%02x\n", wd, wd2);
+ 
+ 	c->last_state = -1;
++	c->psy_desc.name = "usb";
++	c->psy_desc.type = POWER_SUPPLY_TYPE_USB;
++	c->psy_desc.properties = pro1x_usb_props;
++	c->psy_desc.num_properties = ARRAY_SIZE(pro1x_usb_props);
++	c->psy_desc.get_property = pro1x_usb_get_property;
++	{
++		struct power_supply_config cfg = { .drv_data = c };
++
++		c->psy = devm_power_supply_register(dev, &c->psy_desc, &cfg);
++		if (IS_ERR(c->psy))
++			return dev_err_probe(dev, PTR_ERR(c->psy), "usb power supply\n");
++	}
+ 	INIT_DELAYED_WORK(&c->work, pro1x_chg_work);
+ 	platform_set_drvdata(pdev, c);
+ 	schedule_delayed_work(&c->work, msecs_to_jiffies(POLL_MS));
+-- 
+2.56.0
+

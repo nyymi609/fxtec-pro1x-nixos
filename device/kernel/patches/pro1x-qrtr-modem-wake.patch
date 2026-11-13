@@ -1,0 +1,147 @@
+net: qrtr: Wake the system for modem data to user space.
+
+In s2idle the modem's messages (an incoming call, an SMS) reach the
+kernel, but nothing wakes user space, so ModemManager never sees them.
+The modem's IPCRTR endpoint (qrtr-smd, its GLINK edge labelled "mpss")
+now has a wakeup source, and af_qrtr wakes the system for a data packet
+to a user space socket, not to a kernel client.  Two earlier versions
+woke for every GLINK message, then every data packet; both aborted each
+suspend: 2-4 data packets of 48 bytes came 0.2-0.4 s after each entry,
+most likely answers to kernel clients (IPA's QMI).  Off at run time:
+/sys/module/qrtr/parameters/wake_on_data.  Data arriving while
+suspending is logged with its source and destination port.
+
+v4: /sys/module/qrtr/parameters/wake_ports limits the wake to data from
+the listed source ports.  With v3 an incoming call woke the phone, but
+indications from the network (NAS, port 39) and data (WDS, port 42)
+services woke it every ~10 s while registered (2026-11-02); user space
+lists the voice and messaging services' ports.
+
+Ours (fxtec-pro1x-guix, 2026-11-01, v4 2026-11-02).  v3 tested on the
+device (suspend holds unregistered, a call wakes it); v4 compiled only.
+
+--- a/net/qrtr/af_qrtr.c	2026-11-02 01:35:37.567359444 +0100
++++ b/net/qrtr/af_qrtr.c	2026-11-02 01:36:01.893209469 +0100
+@@ -3,6 +3,8 @@
+  * Copyright (c) 2015, Sony Mobile Communications Inc.
+  * Copyright (c) 2013, The Linux Foundation. All rights reserved.
+  */
++#include <linux/device.h>
++#include <linux/suspend.h>
+ #include <linux/module.h>
+ #include <linux/netlink.h>
+ #include <linux/qrtr.h>
+@@ -160,6 +162,40 @@
+ static struct qrtr_sock *qrtr_port_lookup(int port);
+ static void qrtr_port_put(struct qrtr_sock *ipc);
+ 
++/*
++ * An endpoint with a wakeup source (the modem's: qrtr-smd) wakes a suspended
++ * system for a data packet to a user space socket (ModemManager: an
++ * incoming call, an SMS), not for one to a kernel client (IPA's QMI and
++ * the like answered the system going down, and woke it each time).  Off
++ * at run time: /sys/module/qrtr/parameters/wake_on_data.
++ */
++static bool wake_on_data = true;
++module_param(wake_on_data, bool, 0644);
++MODULE_PARM_DESC(wake_on_data, "Data for user space from a wakeup endpoint wakes the system");
++
++/*
++ * When set, only data from these source ports wakes the system: the modem's
++ * network and data services send indications every few seconds (signal,
++ * registration) and kept a suspend from holding; user space lists the ports
++ * of the voice and messaging services (qrtr-lookup).  Empty: any port.
++ */
++static int wake_ports[8];
++static int n_wake_ports;
++module_param_array(wake_ports, int, &n_wake_ports, 0644);
++MODULE_PARM_DESC(wake_ports, "Source ports whose data wakes the system (empty: all)");
++
++static bool qrtr_wake_port(u32 port)
++{
++	int i, n = READ_ONCE(n_wake_ports);
++
++	if (!n)
++		return true;
++	for (i = 0; i < n && i < ARRAY_SIZE(wake_ports); i++)
++		if (READ_ONCE(wake_ports[i]) == port)
++			return true;
++	return false;
++}
++
+ /* Release node resources and free the node.
+  *
+  * Do not call directly, use qrtr_node_release.  To be used with
+@@ -527,6 +563,20 @@
+ 		if (!ipc)
+ 			goto err;
+ 
++		if (ep->ws && cb->type == QRTR_TYPE_DATA) {
++			bool user = !ipc->sk.sk_kern_sock;
++			bool wake = user && READ_ONCE(wake_on_data) &&
++				    qrtr_wake_port(cb->src_port);
++
++			if (pm_suspend_target_state != PM_SUSPEND_ON)
++				pr_info_ratelimited("qrtr: data %u:%u -> %s port %u while suspending%s\n",
++						    cb->src_node, cb->src_port,
++						    user ? "user" : "kernel", cb->dst_port,
++						    wake ? ": wakeup" : "");
++			if (wake)
++				pm_wakeup_ws_event(ep->ws, 1000, true);
++		}
++
+ 		if (sock_queue_rcv_skb(&ipc->sk, skb)) {
+ 			qrtr_port_put(ipc);
+ 			goto err;
+--- a/net/qrtr/qrtr.h	2026-11-02 01:35:37.591360221 +0100
++++ b/net/qrtr/qrtr.h	2026-11-02 01:35:48.746936265 +0100
+@@ -19,6 +19,8 @@
+  */
+ struct qrtr_endpoint {
+ 	int (*xmit)(struct qrtr_endpoint *ep, struct sk_buff *skb);
++	/* Optional: data for user space through it wakes the system */
++	struct wakeup_source *ws;
+ 	/* private: not for endpoint use */
+ 	struct qrtr_node *node;
+ };
+--- a/net/qrtr/smd.c	2026-11-02 01:35:37.591360221 +0100
++++ b/net/qrtr/smd.c	2026-11-02 01:35:48.747170712 +0100
+@@ -4,7 +4,9 @@
+  * Copyright (c) 2013, The Linux Foundation. All rights reserved.
+  */
+ 
++#include <linux/device.h>
+ #include <linux/module.h>
++#include <linux/of.h>
+ #include <linux/skbuff.h>
+ #include <linux/rpmsg.h>
+ 
+@@ -75,6 +77,20 @@
+ 
+ 	dev_set_drvdata(&rpdev->dev, qdev);
+ 
++	/*
++	 * The modem's channel (its GLINK edge is labelled "mpss"): its data
++	 * for user space wakes a suspended system (af_qrtr.c).
++	 */
++	{
++		const char *label;
++
++		if (rpdev->dev.parent && rpdev->dev.parent->of_node &&
++		    !of_property_read_string(rpdev->dev.parent->of_node,
++					     "label", &label) &&
++		    !strcmp(label, "mpss"))
++			qdev->ep.ws = wakeup_source_register(NULL, "qrtr-modem");
++	}
++
+ 	dev_dbg(&rpdev->dev, "Qualcomm SMD QRTR driver probed\n");
+ 
+ 	return 0;
+@@ -85,6 +101,7 @@
+ 	struct qrtr_smd_dev *qdev = dev_get_drvdata(&rpdev->dev);
+ 
+ 	qrtr_endpoint_unregister(&qdev->ep);
++	wakeup_source_unregister(qdev->ep.ws);
+ 
+ 	dev_set_drvdata(&rpdev->dev, NULL);
+ }

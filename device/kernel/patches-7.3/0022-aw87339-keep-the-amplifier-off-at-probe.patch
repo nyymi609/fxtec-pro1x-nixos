@@ -1,0 +1,86 @@
+From 83a510d59520b388991434f9f0ed4f65a8613f8a Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Wed, 28 Oct 2026 19:48:44 +0100
+Subject: [PATCH] aw87339: keep the amplifier off at probe
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The probe drove the enable line high to read the chip ID and then
+powered the amplifier down again: an on/off cycle with no signal at
+every boot. Request the enable line low and drop the informational ID
+read; the first DAPM power-up enables the amplifier and writes its
+configuration as before.
+
+Speaker playback verified on the Pro1-X with the mic loopback check
+(tone 709 vs noise 220). Whether this removes the boot pop is not yet
+confirmed by ear.
+
+Disclosure: LLMGD-2 · origin O1 (author set the goal, the model wrote the code; exercised on the device)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=sound/soc/codecs/aw87339.c; graded-by=model; retrieval=none
+---
+ sound/soc/codecs/aw87339.c | 28 ++++++----------------------
+ 1 file changed, 6 insertions(+), 22 deletions(-)
+
+diff --git a/sound/soc/codecs/aw87339.c b/sound/soc/codecs/aw87339.c
+index a61077078..d7796abcf 100644
+--- a/sound/soc/codecs/aw87339.c
++++ b/sound/soc/codecs/aw87339.c
+@@ -15,10 +15,8 @@
+ #include <linux/regmap.h>
+ #include <sound/soc.h>
+ 
+-#define AW87339_REG_CHIPID	0x00
+ #define AW87339_REG_SYSCTRL	0x01
+ #define AW87339_REG_MAX		0x64
+-#define AW87339_CHIPID		0x39
+ #define AW87339_PWR_DOWN	0x00
+ 
+ struct aw87339 {
+@@ -107,8 +105,6 @@ static const struct snd_soc_component_driver aw87339_component = {
+ static int aw87339_i2c_probe(struct i2c_client *i2c)
+ {
+ 	struct aw87339 *aw;
+-	unsigned int id;
+-	int ret;
+ 
+ 	aw = devm_kzalloc(&i2c->dev, sizeof(*aw), GFP_KERNEL);
+ 	if (!aw)
+@@ -122,28 +118,16 @@ static int aw87339_i2c_probe(struct i2c_client *i2c)
+ 		return dev_err_probe(&i2c->dev, PTR_ERR(aw->regmap),
+ 				     "regmap init failed\n");
+ 
+-	aw->enable = devm_gpiod_get(&i2c->dev, "enable", GPIOD_OUT_HIGH);
++	/*
++	 * Keep the amplifier off at probe: enabling it here only to read the chip ID made it
++	 * switch on and off with no signal at every boot, an audible pop. The first DAPM
++	 * power-up enables it and writes the configuration.
++	 */
++	aw->enable = devm_gpiod_get(&i2c->dev, "enable", GPIOD_OUT_LOW);
+ 	if (IS_ERR(aw->enable))
+ 		return dev_err_probe(&i2c->dev, PTR_ERR(aw->enable),
+ 				     "failed to get enable gpio\n");
+ 
+-	/*
+-	 * Check the chip ID, but never fail the probe: this component is an
+-	 * auxiliary device of the sound card, so failing here would keep the
+-	 * whole card (and the headphones) from ever registering.
+-	 */
+-	usleep_range(2000, 3000);
+-	ret = regmap_read(aw->regmap, AW87339_REG_CHIPID, &id);
+-	if (ret)
+-		dev_warn(&i2c->dev, "chip ID read failed: %d\n", ret);
+-	else if (id != AW87339_CHIPID)
+-		dev_warn(&i2c->dev, "unexpected chip ID 0x%02x\n", id);
+-	else
+-		dev_info(&i2c->dev, "AW87339 found\n");
+-
+-	regmap_write(aw->regmap, AW87339_REG_SYSCTRL, AW87339_PWR_DOWN);
+-	gpiod_set_value_cansleep(aw->enable, 0);
+-
+ 	return devm_snd_soc_register_component(&i2c->dev, &aw87339_component,
+ 					       NULL, 0);
+ }
+-- 
+2.56.0
+

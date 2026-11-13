@@ -1,0 +1,31 @@
+From b8c32c01b675796707301b5744e7511405d9445b Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sat, 31 Oct 2026 16:17:06 +0100
+Subject: [PATCH 47/47] arm64: dts: qcom: sm6115-pro1x: let the USB-C port wake
+ the system
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it; built and tested on the device by the model)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index 8bebf369b..e0aeb5d2d 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -846,6 +846,8 @@ led@3 {
+ 
+ &pmi632_typec {
+ 	status = "okay";
++	/* plugging in a cable wakes the phone */
++	wakeup-source;
+ 
+ 	connector {
+ 		compatible = "usb-c-connector";
+-- 
+2.56.0
+

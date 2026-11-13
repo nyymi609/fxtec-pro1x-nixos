@@ -1,0 +1,86 @@
+From e96f3bd2cec83d4d985feee2b5694a4620a34c7b Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sat, 31 Oct 2026 16:17:06 +0100
+Subject: [PATCH 46/47] usb: typec: tcpm: qcom: wake the system on cable attach
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Nothing woke a suspended phone when a cable was plugged in: the port's
+interrupts were not wake sources, so the attach was only seen at the
+next unrelated wakeup, minutes later on the Pro1-X. With
+"wakeup-source" in the DT, make the VBUS, CC state and attach/detach
+interrupts wake the system while the port is running.
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it; built and tested on the device by the model)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c |  1 +
+ .../typec/tcpm/qcom/qcom_pmic_typec_port.c    | 25 +++++++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+diff --git a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c
+index d770e58bc..f879efcf7 100644
+--- a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c
++++ b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c
+@@ -48,6 +48,7 @@ static int qcom_pmic_typec_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 
+ 	tcpm->dev = dev;
++	device_init_wakeup(dev, of_property_read_bool(np, "wakeup-source"));
+ 	tcpm->tcpc.init = qcom_pmic_typec_init;
+ 
+ 	regmap = dev_get_regmap(dev->parent, NULL);
+diff --git a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c
+index d3523435f..72ad93607 100644
+--- a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c
++++ b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c
+@@ -635,6 +635,29 @@ static int qcom_pmic_typec_port_start_toggling(struct tcpc_dev *tcpc,
+ 	(TYPEC_STATE_MACHINE_CHANGE_INT_EN | TYPEC_VBUS_ERROR_INT_EN | \
+ 	 TYPEC_DEBOUNCE_DONE_INT_EN)
+ 
++static void qcom_pmic_typec_port_set_wake(struct pmic_typec_port *pmic_typec_port,
++					   bool on)
++{
++	int i;
++
++	if (!device_may_wakeup(pmic_typec_port->dev))
++		return;
++
++	/* A cable plugged in while the system sleeps should wake it. */
++	for (i = 0; i < pmic_typec_port->nr_irqs; i++) {
++		switch (pmic_typec_port->irq_data[i].virq) {
++		case PMIC_TYPEC_VBUS_IRQ:
++		case PMIC_TYPEC_CC_STATE_IRQ:
++		case PMIC_TYPEC_ATTACH_DETACH_IRQ:
++			if (on)
++				enable_irq_wake(pmic_typec_port->irq_data[i].irq);
++			else
++				disable_irq_wake(pmic_typec_port->irq_data[i].irq);
++			break;
++		}
++	}
++}
++
+ static int qcom_pmic_typec_port_start(struct pmic_typec *tcpm,
+ 				      struct tcpm_port *tcpm_port)
+ {
+@@ -681,6 +704,7 @@ static int qcom_pmic_typec_port_start(struct pmic_typec *tcpm,
+ 
+ 	for (i = 0; i < pmic_typec_port->nr_irqs; i++)
+ 		enable_irq(pmic_typec_port->irq_data[i].irq);
++	qcom_pmic_typec_port_set_wake(pmic_typec_port, true);
+ 
+ done:
+ 	if (ret)
+@@ -694,6 +718,7 @@ static void qcom_pmic_typec_port_stop(struct pmic_typec *tcpm)
+ 	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
+ 	int i;
+ 
++	qcom_pmic_typec_port_set_wake(pmic_typec_port, false);
+ 	for (i = 0; i < pmic_typec_port->nr_irqs; i++)
+ 		disable_irq(pmic_typec_port->irq_data[i].irq);
+ 
+-- 
+2.56.0
+

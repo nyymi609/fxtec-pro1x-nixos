@@ -1,0 +1,110 @@
+From 35a956dee6056ffb1f0886321529a02003ad83ac Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sat, 31 Oct 2026 18:39:28 +0100
+Subject: [PATCH 50/51] arm64: dts: qcom: sm6115-pro1x: system power domain
+ under the MPM
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add the MPM again (as 0039), but as the parent of a new system power
+domain above both CPU clusters instead of the clusters themselves. The
+system domain carries the downstream system-pc state (0x42000343), so
+the application processor can report sleep to the RPM.
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it from the downstream lpm-levels; built and tested on the device by the model)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=web
+---
+ .../boot/dts/qcom/sm6115-fxtec-pro1x.dts      | 72 +++++++++++++++++++
+ 1 file changed, 72 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index e0aeb5d2d..789bc0e4c 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -1599,6 +1599,10 @@ apss_master_stats: sram@150 {
+ 		reg = <0x150 0x50>;
+ 	};
+ 
++	apss_mpm: sram@1b8 {
++		reg = <0x1b8 0x48>;
++	};
++
+ 	mpss_master_stats: sram@1150 {
+ 		reg = <0x1150 0x50>;
+ 	};
+@@ -1625,3 +1629,71 @@ rpm-master-stats {
+ 		qcom,master-names = "APSS", "MPSS", "ADSP", "CDSP", "TZ";
+ 	};
+ };
++
++/*
++ * MPM, as on QCM2290 (agatti.dtsi) and in the Lenovo TB-J606L port: it watches the wakeup
++ * interrupts while the GIC is off and, as the parent of the system power domain, tells the RPM
++ * that the application processor sleeps. Without it the RPM master stats show APSS never
++ * voting for XO shutdown. Pin map: downstream bengal (qcom-mpm-bengal.c), less 32 for the SPI
++ * numbers; the tlmm GPIOs map through the pinctrl driver's sm6115_mpm_map (touch 80 -> 21,
++ * keyboard slide 96 -> 49).
++ */
++&rpm {
++	mpm: interrupt-controller {
++		compatible = "qcom,mpm";
++		qcom,rpm-msg-ram = <&apss_mpm>;
++		interrupts = <GIC_SPI 197 IRQ_TYPE_EDGE_RISING>;
++		mboxes = <&apcs_glb 1>;
++		interrupt-controller;
++		#interrupt-cells = <2>;
++		#power-domain-cells = <0>;
++		interrupt-parent = <&intc>;
++		qcom,mpm-pin-count = <96>;
++		qcom,mpm-pin-map = <2 190>,	/* TSENS */
++				   <5 296>,	/* LPASS SoundWire */
++				   <12 422>,	/* DWC3 ss_phy_irq */
++				   <24 79>,	/* LPASS LPI */
++				   <86 183>,	/* MPM wake, SPMI (PMIC: power key, RTC) */
++				   <90 260>;	/* QUSB2 PHY DP+DM */
++	};
++};
++
++/*
++ * System level above both clusters (downstream bengal lpm-levels "system-pc": system mode 3,
++ * cluster PC 4, CPU PC 3, affinity level 2, with notify-rpm). Its parent is the MPM, whose
++ * power-off tells the RPM that the application processor sleeps and programs the vMPM wakeup
++ * timer. Without this level the APSS never reports sleep and XO cannot shut down.
++ */
++/ {
++	cpus {
++		domain-idle-states {
++			system_sleep: system-sleep-0 {
++				compatible = "domain-idle-state";
++				arm,psci-suspend-param = <0x42000343>;
++				entry-latency-us = <10831>;
++				exit-latency-us = <4506>;
++				min-residency-us = <15338>;
++			};
++		};
++	};
++
++	psci {
++		system_pd: power-domain-system {
++			#power-domain-cells = <0>;
++			domain-idle-states = <&system_sleep>;
++			power-domains = <&mpm>;
++		};
++	};
++};
++
++&cluster_0_pd {
++	power-domains = <&system_pd>;
++};
++
++&cluster_1_pd {
++	power-domains = <&system_pd>;
++};
++
++&tlmm {
++	wakeup-parent = <&mpm>;
++};
+-- 
+2.56.0
+

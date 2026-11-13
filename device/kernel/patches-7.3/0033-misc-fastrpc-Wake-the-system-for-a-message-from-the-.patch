@@ -1,0 +1,91 @@
+From 9e5e556a2a6770284cfb7e0afc98627e9ae19af7 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Fri, 30 Oct 2026 12:48:00 +0100
+Subject: [PATCH 33/35] misc: fastrpc: Wake the system for a message from the
+ DSP.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The ADSP sensor process calls back into user space (hexagonrpcd) through
+a pending listener invocation. In s2idle user space is frozen, the call
+is never answered, and some 40 s later the DSP crashes
+(EX:sensor_process:0x1:frpc_dsp, issue #23). Each response from the
+DSP now takes a hard wakeup event for 500 ms, as the downstream adsprpc
+driver does, so the system wakes and the listener answers.
+
+Taken from the Lenovo TB-J606L (SM6115) port: haltia-de/device-lenovo-tb-j606l
+kernel patch 0015 (commit 9838554, issue #23). The Pro1-X crashed the same way at its
+first s2idle resume (EX:sensor_process:0x1:frpc_dsp:0xbe:PC=0xb2022ad0, 2026-10-30).
+
+Disclosure: LLMGD-0 · origin O1 (the model took the J606L port's patch; not yet run on this device)
+LLMGD: v0.3; assurance=A0; flags=none; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/misc/fastrpc.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/drivers/misc/fastrpc.c b/drivers/misc/fastrpc.c
+index d4fac2cac..e68c3d433 100644
+--- a/drivers/misc/fastrpc.c
++++ b/drivers/misc/fastrpc.c
+@@ -14,6 +14,7 @@
+ #include <linux/of_address.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_wakeup.h>
+ #include <linux/sort.h>
+ #include <linux/of_platform.h>
+ #include <linux/rpmsg.h>
+@@ -301,6 +302,8 @@ struct fastrpc_soc_data {
+ 	bool poll_mode_supported;
+ };
+ 
++#define FASTRPC_WAKE_MS	500
++
+ struct fastrpc_channel_ctx {
+ 	int domain_id;
+ 	int sesscount;
+@@ -326,6 +329,8 @@ struct fastrpc_channel_ctx {
+ 	atomic_t ctx_seq;
+ 	u64 dma_mask;
+ 	const struct fastrpc_soc_data *soc_data;
++	/* Holds the system up while user space answers the DSP. */
++	struct wakeup_source *ws;
+ };
+ 
+ struct fastrpc_device {
+@@ -2640,6 +2645,7 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
+ 	idr_init(&data->ctx_idr);
+ 	data->domain_id = domain_id;
+ 	data->rpdev = rpdev;
++	data->ws = wakeup_source_register(rdev, domain);
+ 	dev_set_drvdata(&rpdev->dev, data);
+ 
+ 	err = of_platform_populate(rdev->of_node, NULL, NULL, rdev);
+@@ -2699,6 +2705,7 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
+ 
+ 	of_platform_depopulate(&rpdev->dev);
+ 
++	wakeup_source_unregister(cctx->ws);
+ 	fastrpc_channel_ctx_put(cctx);
+ }
+ 
+@@ -2757,6 +2764,15 @@ static int fastrpc_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
+ 	ctx->is_work_done = true;
+ 	complete(&ctx->work);
+ 
++	/*
++	 * A message from the DSP may be a call for a user space listener
++	 * (hexagonrpcd answering the sensor process): wake a system in
++	 * s2idle and hold it up for the answer, or the DSP times out and
++	 * crashes. The downstream adsprpc driver does the same.
++	 */
++	if (cctx->ws)
++		pm_wakeup_ws_event(cctx->ws, FASTRPC_WAKE_MS, true);
++
+ 	/*
+ 	 * The DMA buffer associated with the context cannot be freed in
+ 	 * interrupt context so schedule it through a worker thread to
+-- 
+2.56.0
+

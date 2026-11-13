@@ -1,0 +1,42 @@
+From c3b4e548d7e045057950bd747a568ad1f0ad1a41 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sat, 31 Oct 2026 12:28:47 +0100
+Subject: [PATCH 42/43] drm/panel: boe-bf060y8m-aj0: skip brightness writes
+ while unprepared
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+mce sets the backlight around display on/off, while the DSI host is
+powered down, and every such write failed with "Failed to write display
+brightness: -22". Skip the write then; boe_bf060y8m_aj0_on() sends the
+current level when the panel comes up (as panel-samsung-sofef00 does).
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it from the msm DSI host and panel code; built, not yet on the device)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c b/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c
+index 137e7e1d8..9effebea2 100644
+--- a/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c
++++ b/drivers/gpu/drm/panel/panel-boe-bf060y8m-aj0.c
+@@ -241,9 +241,14 @@ static const struct drm_panel_funcs boe_bf060y8m_aj0_panel_funcs = {
+ static int boe_bf060y8m_aj0_bl_update_status(struct backlight_device *bl)
+ {
+ 	struct mipi_dsi_device *dsi = bl_get_data(bl);
++	struct boe_bf060y8m_aj0 *boe = mipi_dsi_get_drvdata(dsi);
+ 	u16 brightness = backlight_get_brightness(bl);
+ 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
+ 
++	/* the DSI host is off (-EINVAL); boe_bf060y8m_aj0_on() sends the level */
++	if (!boe->panel.prepared)
++		return 0;
++
+ 	mipi_dsi_dcs_set_display_brightness_multi(&dsi_ctx, brightness);
+ 
+ 	return dsi_ctx.accum_err;
+-- 
+2.56.0
+

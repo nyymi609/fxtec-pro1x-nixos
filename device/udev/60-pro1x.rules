@@ -6,3 +6,8 @@ SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="aw86224-haptics", ENV{FEEDBA
 # Keyboard slider switch (SW_KEYPAD_SLIDE, used by SXMO's keyboard autorotate): readable by
 # the input group, and with a stable name because the eventN number changes between boots.
 SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="gpio-keys", GROUP="input", MODE="0660", SYMLINK+="input/pro1x-slider"
+
+# The USB controller off while unplugged, so its supplies switch off in suspend
+# (moWerk: 29-32 mA instead of 40-42). At bind: dwc3's probe resets
+# power/control to "on" (his 70-qx1050-usb-runtime-pm.rules, as fxtec-pro1x-guix).
+ACTION=="bind", SUBSYSTEM=="platform", DRIVER=="dwc3", ATTR{power/control}="auto"

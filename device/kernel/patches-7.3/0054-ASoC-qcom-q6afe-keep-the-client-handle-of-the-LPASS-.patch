@@ -1,0 +1,101 @@
+From 2e65e83ac0e9b9d81ef08937ec9688f140f1ca76 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sun, 1 Nov 2026 15:25:56 +0100
+Subject: [PATCH] ASoC: qcom: q6afe: keep the client handle of the LPASS core
+ hw vote
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The DSP answers AFE_CMD_REMOTE_LPASS_CORE_HW_VOTE_REQUEST with the client
+handle it assigned to the vote, and the devote request must name that
+handle. q6afe_vote_lpass_core_hw() never stores it: the callback reads the
+response payload as a basic result and *client_handle is left untouched,
+so every devote carries a handle the DSP never handed out. The DSP
+refuses it (the devote returns ADSP_EFAILED, logged as "cmd = 0x100f6
+returned error = 0x1" and "Unknown cmd 0x100f6") and keeps the vote: once
+anything has voted, the LPASS core stays on and the ADSP cannot power
+collapse.
+
+Keep the handle per hw block from the response, as the downstream driver
+does (payload[0], indexed by the token), hand it to the caller, and treat
+the devote result as a known command.
+
+On the Fxtec Pro1-X (SM6115) the ADSP never power-collapsed before
+(RPM master stats: shutdown count 0 and no bringup request for the whole
+boot). With this it reached 91 XO shutdowns in its first two minutes.
+
+Disclosure: LLMGD-2 · origin O1 (the model found it from the DSP's error log and the downstream driver; built and tested on the device by the model)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ sound/soc/qcom/qdsp6/q6afe.c | 23 ++++++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6afe.c b/sound/soc/qcom/qdsp6/q6afe.c
+index f0ff1350e..8c0c79d0b 100644
+--- a/sound/soc/qcom/qdsp6/q6afe.c
++++ b/sound/soc/qcom/qdsp6/q6afe.c
+@@ -396,6 +396,8 @@ struct q6afe {
+ 	wait_queue_head_t wait;
+ 	struct list_head port_list;
+ 	spinlock_t port_list_lock;
++	/* DSP client handles of the LPASS core hw votes, by hw block id */
++	u32 lpass_hw_handle[Q6AFE_LPASS_CORE_HW_DCODEC_BLOCK + 1];
+ };
+ 
+ struct afe_port_cmd_device_start {
+@@ -1036,6 +1038,9 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
+ 				wake_up(&afe->wait);
+ 			}
+ 			break;
++		case AFE_CMD_REMOTE_LPASS_CORE_HW_DEVOTE_REQUEST:
++			/* Nobody waits for the devote; an error is logged above */
++			break;
+ 		default:
+ 			dev_err(afe->dev, "Unknown cmd 0x%x\n",	res->opcode);
+ 			break;
+@@ -1043,8 +1048,12 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
+ 	}
+ 		break;
+ 	case AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST:
++		/* The payload is the client handle the DSP assigned, not a result */
++		if (data->payload_size >= sizeof(u32) &&
++		    hdr->token < ARRAY_SIZE(afe->lpass_hw_handle))
++			afe->lpass_hw_handle[hdr->token] = *(const u32 *)data->payload;
++		afe->result.status = 0;
+ 		afe->result.opcode = hdr->opcode;
+-		afe->result.status = res->status;
+ 		wake_up(&afe->wait);
+ 		break;
+ 	default:
+@@ -1932,6 +1941,9 @@ int q6afe_vote_lpass_core_hw(struct device *dev, uint32_t hw_block_id,
+ 	int ret = 0;
+ 	int pkt_size = APR_HDR_SIZE + sizeof(*vote_cfg);
+ 
++	if (hw_block_id >= ARRAY_SIZE(afe->lpass_hw_handle))
++		return -EINVAL;
++
+ 	void *p __free(kfree) = kzalloc(pkt_size, GFP_KERNEL);
+ 	if (!p)
+ 		return -ENOMEM;
+@@ -1953,10 +1965,15 @@ int q6afe_vote_lpass_core_hw(struct device *dev, uint32_t hw_block_id,
+ 
+ 	ret = afe_apr_send_pkt(afe, pkt, NULL,
+ 			       AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST);
+-	if (ret)
++	if (ret) {
+ 		dev_err(afe->dev, "AFE failed to vote (%d)\n", hw_block_id);
++		return ret;
++	}
+ 
+-	return ret;
++	/* The devote must name this handle, or the DSP keeps the vote */
++	*client_handle = afe->lpass_hw_handle[hw_block_id];
++
++	return 0;
+ }
+ EXPORT_SYMBOL(q6afe_vote_lpass_core_hw);
+ 
+-- 
+2.56.0
+

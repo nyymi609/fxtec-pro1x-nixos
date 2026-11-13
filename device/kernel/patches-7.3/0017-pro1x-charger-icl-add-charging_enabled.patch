@@ -1,0 +1,119 @@
+From dad07de0f4faa59dd72c0a29b770ee91784208c4 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Wed, 28 Oct 2026 15:43:06 +0100
+Subject: [PATCH] pro1x-charger-icl: add charging_enabled
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Expose the PMI632 charge enable bit (CHGR_ENABLE_CMD bit 0) as a writable
+charging_enabled attribute on the charger device: 0 stops charging while
+the phone keeps running from USB, 1 resumes it. SailfishOS mce uses it to
+hold a charge limit; on the vendor kernel the same role is played by
+the battery's input_suspend.
+
+The recovery path that toggles a disabled charger back on now leaves a
+user-requested stop alone, and removing the driver re-enables charging.
+
+Disclosure: LLMGD-0 · origin O1 (author set the goal, the model wrote the code)
+LLMGD: v0.3; assurance=A0; flags=none; origin=O1; origin_headline=O1; scope=drivers/power/supply/pro1x-charger-icl.c; graded-by=model; retrieval=none
+---
+ drivers/power/supply/pro1x-charger-icl.c | 54 +++++++++++++++++++++++-
+ 1 file changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/power/supply/pro1x-charger-icl.c b/drivers/power/supply/pro1x-charger-icl.c
+index b68dc24b6..be9854d25 100644
+--- a/drivers/power/supply/pro1x-charger-icl.c
++++ b/drivers/power/supply/pro1x-charger-icl.c
+@@ -71,6 +71,7 @@ struct pro1x_chg {
+ 	unsigned int applied_ma;	/* what this plug-in already got */
+ 	bool present;
+ 	bool recovered;
++	bool user_disabled;	/* charging switched off through charging_enabled */
+ 	int last_state;
+ 	unsigned int last_apsd, last_snk, last_icl;
+ };
+@@ -166,7 +167,8 @@ static void pro1x_chg_work(struct work_struct *w)
+ 				dev_info(c->dev, "charger state %u\n", st);
+ 			c->last_state = st;
+ 			rd(c, CHGR_ENABLE_CMD, &en);
+-			if (st == CHGR_STATE_DISABLED && (en & CHGR_ENABLE) && !c->recovered) {
++			if (st == CHGR_STATE_DISABLED && (en & CHGR_ENABLE) && !c->recovered &&
++			    !c->user_disabled) {
+ 				c->recovered = true;
+ 				regmap_update_bits(c->map, c->base + CHGR_ENABLE_CMD, CHGR_ENABLE, 0);
+ 				msleep(50);
+@@ -185,6 +187,49 @@ static void pro1x_chg_work(struct work_struct *w)
+ 	schedule_delayed_work(&c->work, msecs_to_jiffies(POLL_MS));
+ }
+ 
++/*
++ * charging_enabled: 1 charges, 0 stops charging while the phone keeps running from USB.
++ * mce writes it to hold a charge limit ([Charging] ControlPath in its config).
++ */
++static ssize_t charging_enabled_show(struct device *dev, struct device_attribute *attr,
++				     char *buf)
++{
++	struct pro1x_chg *c = dev_get_drvdata(dev);
++	unsigned int en = 0;
++	int ret;
++
++	ret = rd(c, CHGR_ENABLE_CMD, &en);
++	if (ret)
++		return ret;
++	return sysfs_emit(buf, "%d\n", !!(en & CHGR_ENABLE));
++}
++
++static ssize_t charging_enabled_store(struct device *dev, struct device_attribute *attr,
++				      const char *buf, size_t count)
++{
++	struct pro1x_chg *c = dev_get_drvdata(dev);
++	bool on;
++	int ret;
++
++	ret = kstrtobool(buf, &on);
++	if (ret)
++		return ret;
++	c->user_disabled = !on;
++	ret = regmap_update_bits(c->map, c->base + CHGR_ENABLE_CMD, CHGR_ENABLE,
++				 on ? CHGR_ENABLE : 0);
++	if (ret)
++		return ret;
++	dev_info(dev, "charging %s\n", on ? "enabled" : "disabled");
++	return count;
++}
++static DEVICE_ATTR_RW(charging_enabled);
++
++static struct attribute *pro1x_chg_attrs[] = {
++	&dev_attr_charging_enabled.attr,
++	NULL
++};
++ATTRIBUTE_GROUPS(pro1x_chg);
++
+ static int pro1x_chg_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -219,7 +264,11 @@ static int pro1x_chg_probe(struct platform_device *pdev)
+ 
+ static void pro1x_chg_remove(struct platform_device *pdev)
+ {
+-	cancel_delayed_work_sync(&((struct pro1x_chg *)platform_get_drvdata(pdev))->work);
++	struct pro1x_chg *c = platform_get_drvdata(pdev);
++
++	cancel_delayed_work_sync(&c->work);
++	if (c->user_disabled)
++		regmap_update_bits(c->map, c->base + CHGR_ENABLE_CMD, CHGR_ENABLE, CHGR_ENABLE);
+ }
+ 
+ static const struct of_device_id pro1x_chg_of_match[] = {
+@@ -232,6 +281,7 @@ static struct platform_driver pro1x_chg_driver = {
+ 	.driver = {
+ 		.name = "pro1x-charger-icl",
+ 		.of_match_table = pro1x_chg_of_match,
++		.dev_groups = pro1x_chg_groups,
+ 	},
+ 	.probe = pro1x_chg_probe,
+ 	.remove = pro1x_chg_remove,
+-- 
+2.56.0
+

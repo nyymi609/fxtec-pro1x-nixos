@@ -74,9 +74,10 @@
         sensors = ./modules/sensors.nix;
         diag = ./modules/diag.nix;
         usb-network = ./modules/usb-network.nix;
+        fingerprint = ./modules/fingerprint.nix;
         boot-success = ./modules/boot-success.nix;
         boot-menu = ./modules/boot-menu.nix;
-        default.imports = with self.nixosModules; [ hardware audio camera keyboard modem sensors diag usb-network boot-success boot-menu ];
+        default.imports = with self.nixosModules; [ hardware audio camera keyboard modem sensors diag usb-network fingerprint boot-success boot-menu ];
         # Use on x86_64 build machines: kernel cross-compiled instead of built natively
         # (or emulated). Without it the kernel is built natively for aarch64.
         cross-kernel.pro1x.kernelPackage = xc.pro1x-kernel;

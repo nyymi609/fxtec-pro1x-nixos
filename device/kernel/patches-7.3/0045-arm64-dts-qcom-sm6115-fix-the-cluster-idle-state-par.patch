@@ -1,0 +1,73 @@
+From 4b7f598e0f66dfe2d9dc2af005d57d4f86c5499a Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sat, 31 Oct 2026 16:04:59 +0100
+Subject: [PATCH] arm64: dts: qcom: sm6115: fix the cluster idle state
+ parameters
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+In OS-initiated mode cpuidle-psci passes the domain state to PSCI in
+place of the CPU state, so the cluster states must carry the CPU's
+power-collapse mode (3). The cluster power collapse used 0x41000044
+(CPU field 4, a rail collapse sm6115 does not have) and the GDHS states
+lacked the affinity level (0x40000022, and 0x40000042 with the PC field
+on cluster 1). The firmware refused them: on the Pro1-X about 44
+million cluster rejections per boot, the s2idle loop re-entering idle
+millions of times and the clock only half frozen in suspend.
+
+Use the encoding of the downstream bengal lpm-levels (CPU mode in bits
+0-3, cluster mode in bits 4-7, affinity level 1): 0x41000043 for cluster
+power collapse, as agatti, and 0x41000023 for GDHS. With these the
+states are entered, s2idle stays frozen 96 % of a 34 min unplugged
+window instead of 50 %, and the RCU stalls in suspend are gone.
+
+Disclosure: LLMGD-2 · origin O1 (the model found it from the idle counters and the downstream DT; tested on the device by the model)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ arch/arm64/boot/dts/qcom/sm6115.dtsi | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115.dtsi b/arch/arm64/boot/dts/qcom/sm6115.dtsi
+index 791a38f92..615f1181c 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6115.dtsi
+@@ -232,7 +232,7 @@ domain-idle-states {
+ 			cluster_0_sleep_0: cluster-sleep-0-0 {
+ 				/* GDHS */
+ 				compatible = "domain-idle-state";
+-				arm,psci-suspend-param = <0x40000022>;
++				arm,psci-suspend-param = <0x41000023>;
+ 				entry-latency-us = <360>;
+ 				exit-latency-us = <421>;
+ 				min-residency-us = <782>;
+@@ -241,7 +241,7 @@ cluster_0_sleep_0: cluster-sleep-0-0 {
+ 			cluster_0_sleep_1: cluster-sleep-0-1 {
+ 				/* Power Collapse */
+ 				compatible = "domain-idle-state";
+-				arm,psci-suspend-param = <0x41000044>;
++				arm,psci-suspend-param = <0x41000043>;
+ 				entry-latency-us = <800>;
+ 				exit-latency-us = <2118>;
+ 				min-residency-us = <7376>;
+@@ -250,7 +250,7 @@ cluster_0_sleep_1: cluster-sleep-0-1 {
+ 			cluster_1_sleep_0: cluster-sleep-1-0 {
+ 				/* GDHS */
+ 				compatible = "domain-idle-state";
+-				arm,psci-suspend-param = <0x40000042>;
++				arm,psci-suspend-param = <0x41000023>;
+ 				entry-latency-us = <314>;
+ 				exit-latency-us = <345>;
+ 				min-residency-us = <660>;
+@@ -259,7 +259,7 @@ cluster_1_sleep_0: cluster-sleep-1-0 {
+ 			cluster_1_sleep_1: cluster-sleep-1-1 {
+ 				/* Power Collapse */
+ 				compatible = "domain-idle-state";
+-				arm,psci-suspend-param = <0x41000044>;
++				arm,psci-suspend-param = <0x41000043>;
+ 				entry-latency-us = <640>;
+ 				exit-latency-us = <1654>;
+ 				min-residency-us = <8094>;
+-- 
+2.56.0
+

@@ -1,0 +1,227 @@
+From 3c99bd9962ab81ba6cb5b8b482508c678f80f985 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Fri, 30 Oct 2026 12:47:49 +0100
+Subject: [PATCH 32/35] soc: qcom: Add the SMP2P sleep state driver.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The ADSP sensor framework (SEE) reads bit 12 of the "sleepstate" SMP2P
+entry to know whether the application processor is awake, and raises
+its "sleepstate_see" bit to wake it. Without it the SEE keeps talking to
+a suspended system. Ported from the Qualcomm downstream driver.
+
+The Pro1-X device tree gains the sleepstate entries of the stock bengal tree.
+
+Taken from the Lenovo TB-J606L (SM6115) port: haltia-de/device-lenovo-tb-j606l
+kernel patch 0013 and its DT change (commit 9838554, issue #23).
+
+Disclosure: LLMGD-0 · origin O1 (the model took the J606L port's patch after the same ADSP crash at resume; not yet run on this device)
+LLMGD: v0.3; assurance=A0; flags=none; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ .../boot/dts/qcom/sm6115-fxtec-pro1x.dts      |  26 ++++
+ drivers/soc/qcom/Kconfig                      |   9 ++
+ drivers/soc/qcom/Makefile                     |   1 +
+ drivers/soc/qcom/smp2p-sleepstate.c           | 124 ++++++++++++++++++
+ 4 files changed, 160 insertions(+)
+ create mode 100644 drivers/soc/qcom/smp2p-sleepstate.c
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index e6469cde4..fef7967fb 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -1553,3 +1553,29 @@ &venus {
+ 	 */
+ 	status = "okay";
+ };
++
++/*
++ * The ADSP sensor framework learns from the "sleepstate" SMP2P entry whether the system is
++ * awake and wakes it through "sleepstate_see", as in the stock bengal tree
++ * (qcom,smp2p_sleepstate; driver qcom,smp2p-sleepstate). From the Lenovo TB-J606L port.
++ */
++&{/smp2p-adsp} {
++	adsp_sleepstate_out: sleepstate-out {
++		qcom,entry-name = "sleepstate";
++		#qcom,smem-state-cells = <1>;
++	};
++
++	adsp_sleepstate_in: sleepstate-in {
++		qcom,entry-name = "sleepstate_see";
++		interrupt-controller;
++		#interrupt-cells = <2>;
++	};
++};
++
++/ {
++	smp2p-sleepstate {
++		compatible = "qcom,smp2p-sleepstate";
++		qcom,smem-states = <&adsp_sleepstate_out 0>;
++		interrupts-extended = <&adsp_sleepstate_in 0 IRQ_TYPE_EDGE_RISING>;
++	};
++};
+diff --git a/drivers/soc/qcom/Kconfig b/drivers/soc/qcom/Kconfig
+index 2b524154d..23a302920 100644
+--- a/drivers/soc/qcom/Kconfig
++++ b/drivers/soc/qcom/Kconfig
+@@ -202,6 +202,15 @@ config QCOM_SMP2P
+ 	  Say yes here to support the Qualcomm Shared Memory Point to Point
+ 	  protocol.
+ 
++
++config QCOM_SMP2P_SLEEPSTATE
++	tristate "Qualcomm SMP2P sleep state"
++	depends on QCOM_SMP2P
++	help
++	  Tell a remote processor, such as the ADSP's sensor framework, over
++	  SMP2P when the system suspends and resumes, and let its sensors wake
++	  the system.
++
+ config QCOM_SMSM
+ 	tristate "Qualcomm Shared Memory State Machine"
+ 	depends on MAILBOX
+diff --git a/drivers/soc/qcom/Makefile b/drivers/soc/qcom/Makefile
+index 798643be3..8f6f9d61f 100644
+--- a/drivers/soc/qcom/Makefile
++++ b/drivers/soc/qcom/Makefile
+@@ -28,6 +28,7 @@ obj-$(CONFIG_QCOM_SMEM) +=	qcom_smem.o
+ obj-$(CONFIG_QCOM_SMEM_STATE) += smem_state.o
+ CFLAGS_smp2p.o := -I$(src)
+ obj-$(CONFIG_QCOM_SMP2P)	+= smp2p.o
++obj-$(CONFIG_QCOM_SMP2P_SLEEPSTATE)	+= smp2p-sleepstate.o
+ obj-$(CONFIG_QCOM_SMSM)	+= smsm.o
+ obj-$(CONFIG_QCOM_SOCINFO)	+= socinfo.o
+ obj-$(CONFIG_QCOM_SPM)		+= spm.o
+diff --git a/drivers/soc/qcom/smp2p-sleepstate.c b/drivers/soc/qcom/smp2p-sleepstate.c
+new file mode 100644
+index 000000000..aa3f7aad0
+--- /dev/null
++++ b/drivers/soc/qcom/smp2p-sleepstate.c
+@@ -0,0 +1,124 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Tell a remote processor over SMP2P whether the application processor is
++ * awake. The ADSP's sensor framework (SEE) holds back what it would send
++ * while the bit is clear, and raises its own bit to wake the system when a
++ * wake-up sensor needs it. From the Qualcomm downstream smp2p_sleepstate
++ * driver.
++ *
++ * Copyright (c) 2014-2019, The Linux Foundation. All rights reserved.
++ */
++#include <linux/interrupt.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/pm_wakeup.h>
++#include <linux/soc/qcom/smem_state.h>
++#include <linux/suspend.h>
++
++/* Downstream sets bit 12 whatever the cell says; the SEE reads that one. */
++#define AWAKE_BIT	BIT(12)
++
++struct sleepstate {
++	struct qcom_smem_state *state;
++	struct wakeup_source *ws;
++	struct notifier_block nb;
++};
++
++static int sleepstate_pm_notifier(struct notifier_block *nb,
++				  unsigned long event, void *unused)
++{
++	struct sleepstate *ss = container_of(nb, struct sleepstate, nb);
++
++	switch (event) {
++	case PM_SUSPEND_PREPARE:
++		qcom_smem_state_update_bits(ss->state, AWAKE_BIT, 0);
++		break;
++	case PM_POST_SUSPEND:
++		qcom_smem_state_update_bits(ss->state, AWAKE_BIT, AWAKE_BIT);
++		break;
++	}
++
++	return NOTIFY_DONE;
++}
++
++static irqreturn_t sleepstate_irq(int irq, void *data)
++{
++	struct sleepstate *ss = data;
++
++	pm_wakeup_ws_event(ss->ws, 200, true);
++	return IRQ_HANDLED;
++}
++
++static void sleepstate_unregister(void *data)
++{
++	struct sleepstate *ss = data;
++
++	unregister_pm_notifier(&ss->nb);
++	wakeup_source_unregister(ss->ws);
++}
++
++static int sleepstate_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct sleepstate *ss;
++	unsigned int bit;
++	int irq, ret;
++
++	ss = devm_kzalloc(dev, sizeof(*ss), GFP_KERNEL);
++	if (!ss)
++		return -ENOMEM;
++
++	ss->state = devm_qcom_smem_state_get(dev, NULL, &bit);
++	if (IS_ERR(ss->state))
++		return dev_err_probe(dev, PTR_ERR(ss->state), "no smem state\n");
++
++	irq = platform_get_irq(pdev, 0);
++	if (irq < 0)
++		return irq;
++
++	ss->ws = wakeup_source_register(dev, "smp2p-sleepstate");
++	if (!ss->ws)
++		return -ENOMEM;
++
++	ss->nb.notifier_call = sleepstate_pm_notifier;
++	ss->nb.priority = INT_MAX;
++	ret = register_pm_notifier(&ss->nb);
++	if (ret) {
++		wakeup_source_unregister(ss->ws);
++		return ret;
++	}
++
++	ret = devm_add_action_or_reset(dev, sleepstate_unregister, ss);
++	if (ret)
++		return ret;
++
++	ret = devm_request_threaded_irq(dev, irq, NULL, sleepstate_irq,
++					IRQF_ONESHOT | IRQF_TRIGGER_RISING,
++					"smp2p-sleepstate", ss);
++	if (ret)
++		return ret;
++
++	enable_irq_wake(irq);
++	qcom_smem_state_update_bits(ss->state, AWAKE_BIT, AWAKE_BIT);
++
++	return 0;
++}
++
++static const struct of_device_id sleepstate_of_match[] = {
++	{ .compatible = "qcom,smp2p-sleepstate" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sleepstate_of_match);
++
++static struct platform_driver sleepstate_driver = {
++	.probe = sleepstate_probe,
++	.driver = {
++		.name = "qcom-smp2p-sleepstate",
++		.of_match_table = sleepstate_of_match,
++	},
++};
++module_platform_driver(sleepstate_driver);
++
++MODULE_DESCRIPTION("Qualcomm SMP2P sleep state");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+

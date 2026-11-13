@@ -1,0 +1,59 @@
+From 9fdb8392f0843c2946922303491241dee6275fea Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Mon, 2 Nov 2026 01:03:25 +0100
+Subject: [PATCH 56/57] scsi: ufs: qcom: Power down UFS during system suspend
+ on SM6115
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+On SM6115 the UFS PHY loses its state when the SoC power-collapses in
+system suspend (PSCI system idle state, RPM vmin), so exiting hibern8 on
+resume fails and the error handler then faults on the powered-down host:
+
+ufshcd-qcom 4804000.ufshc: pwr ctrl cmd 0x18 with (MIBattribute 0x0, mode 0x0) completion timeout
+ufshcd-qcom 4804000.ufshc: ufshcd_uic_hibern8_exit: hibern8 exit failed. ret = -110
+ufshcd-qcom 4804000.ufshc: __ufshcd_wl_resume: hibern8 exit failed -110
+SError Interrupt on CPU0, code 0x00000000bf000002 -- SError
+Workqueue: ufs_eh_wq_0 ufshcd_err_handler
+
+Set no_phy_retention, as for SM8550 and Milos, so the controller and
+device are powered down during system suspend and the link is brought up
+again on resume.
+
+Tested on the F(x)tec Pro1-X (QX1050): with the system idle state the
+SoC reaches vmin in suspend and resumes cleanly, where spm_lvl 3 crashed
+on the first or second suspend.
+
+Disclosure: LLMGD-2 · origin O1 (the model found it from a RAM dump of the crash and the upstream Milos fix; tested on the device by the model)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/ufs/host/ufs-qcom.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/ufs/host/ufs-qcom.c b/drivers/ufs/host/ufs-qcom.c
+index a132b2f99..c02430c24 100644
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -3032,6 +3032,10 @@ static void ufs_qcom_remove(struct platform_device *pdev)
+ 		platform_device_msi_free_irqs_all(hba->dev);
+ }
+ 
++static const struct ufs_qcom_drvdata ufs_qcom_sm6115_drvdata = {
++	.no_phy_retention = true,
++};
++
+ static const struct ufs_qcom_drvdata ufs_qcom_sm8550_drvdata = {
+ 	.quirks = UFSHCD_QUIRK_BROKEN_LSDBS_CAP,
+ 	.no_phy_retention = true,
+@@ -3043,6 +3047,7 @@ static const struct ufs_qcom_drvdata ufs_qcom_sa8255p_drvdata = {
+ 
+ static const struct of_device_id ufs_qcom_of_match[] __maybe_unused = {
+ 	{ .compatible = "qcom,ufshc" },
++	{ .compatible = "qcom,sm6115-ufshc", .data = &ufs_qcom_sm6115_drvdata },
+ 	{ .compatible = "qcom,sm8550-ufshc", .data = &ufs_qcom_sm8550_drvdata },
+ 	{ .compatible = "qcom,sm8650-ufshc", .data = &ufs_qcom_sm8550_drvdata },
+ 	{ .compatible = "qcom,sa8255p-ufshc", .data = &ufs_qcom_sa8255p_drvdata },
+-- 
+2.56.0
+

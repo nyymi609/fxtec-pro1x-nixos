@@ -1,0 +1,71 @@
+From b0d76ae7119c7862a173d0548b80277efabf442f Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Fri, 30 Oct 2026 15:58:44 +0100
+Subject: [PATCH 37/37] arm64: dts: qcom: sm6115-pro1x: add the RPM master
+ stats
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Which RPM master (APSS, MPSS, ADSP, CDSP, TZ) keeps the SoC out of XO
+shutdown: the Pro1-X suspends but never reaches vlow/vmin. Layout of the
+downstream bengal tree: 0x45f0150, one 0x1000 slice per master.
+
+Disclosure: LLMGD-0 · origin O1 (the model wrote it from the downstream bengal-pm.dtsi values; not yet built)
+LLMGD: v0.3; assurance=A0; flags=none; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ .../boot/dts/qcom/sm6115-fxtec-pro1x.dts      | 41 +++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index edc9a92be..8bebf369b 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -1582,3 +1582,44 @@ smp2p-sleepstate {
+ 		interrupts-extended = <&adsp_sleepstate_in 0 IRQ_TYPE_EDGE_RISING>;
+ 	};
+ };
++
++/*
++ * RPM master stats: which master (APSS, MPSS, ADSP, CDSP, TZ) keeps the RPM out of XO
++ * shutdown (debugfs qcom_rpm_master_stats/). Layout as in the downstream bengal tree
++ * (rpm-master-stats at 0x45f0150, one 0x1000 slice per master).
++ */
++&rpm_msg_ram {
++	#address-cells = <1>;
++	#size-cells = <1>;
++	ranges = <0 0x0 0x045f0000 0x7000>;
++
++	apss_master_stats: sram@150 {
++		reg = <0x150 0x50>;
++	};
++
++	mpss_master_stats: sram@1150 {
++		reg = <0x1150 0x50>;
++	};
++
++	adsp_master_stats: sram@2150 {
++		reg = <0x2150 0x50>;
++	};
++
++	cdsp_master_stats: sram@3150 {
++		reg = <0x3150 0x50>;
++	};
++
++	tz_master_stats: sram@4150 {
++		reg = <0x4150 0x50>;
++	};
++};
++
++/ {
++	rpm-master-stats {
++		compatible = "qcom,rpm-master-stats";
++		qcom,rpm-msg-ram = <&apss_master_stats>, <&mpss_master_stats>,
++				   <&adsp_master_stats>, <&cdsp_master_stats>,
++				   <&tz_master_stats>;
++		qcom,master-names = "APSS", "MPSS", "ADSP", "CDSP", "TZ";
++	};
++};
+-- 
+2.56.0
+

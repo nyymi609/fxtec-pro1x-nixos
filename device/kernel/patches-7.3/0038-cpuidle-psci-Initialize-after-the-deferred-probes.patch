@@ -1,0 +1,42 @@
+From 3f896af60c909826a0096c299d6366f580667a61 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Fri, 30 Oct 2026 21:01:32 +0100
+Subject: [PATCH 38/40] cpuidle: psci: Initialize after the deferred probes.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The psci-cpuidle faux device probes once, at device_initcall. With the
+MPM as the parent of both CPU cluster domains, the PSCI domains defer
+until the MPM probes and arrive only from the deferred probe work. So
+the cpuidle driver found no domain ("CPU 0 failed to PSCI idle") and
+the CPUs only ever ran WFI. late_initcall_sync comes after
+deferred_probe_initcall has run and flushed them.
+
+Taken from the Lenovo TB-J606L (SM6115) port: haltia-de/device-lenovo-tb-j606l
+kernel patch 0017, with its MPM device tree (next commit).
+
+Disclosure: LLMGD-2 · origin O1 (the model took the J606L port's patch; built and running on the device)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/cpuidle/cpuidle-psci.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/cpuidle/cpuidle-psci.c b/drivers/cpuidle/cpuidle-psci.c
+index b250d0dde..0ad6669c8 100644
+--- a/drivers/cpuidle/cpuidle-psci.c
++++ b/drivers/cpuidle/cpuidle-psci.c
+@@ -479,4 +479,9 @@ static int __init psci_idle_init(void)
+ 
+ 	return 0;
+ }
+-device_initcall(psci_idle_init);
++/*
++ * The faux device probes once. The CPU PM domains may still wait for a
++ * parent domain (the MPM on SM6115 and QCM2290) and come only from the
++ * deferred probes, which late_initcall runs and waits for.
++ */
++late_initcall_sync(psci_idle_init);
+-- 
+2.56.0
+

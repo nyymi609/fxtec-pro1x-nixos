@@ -1,0 +1,46 @@
+From 52878c2ab3f68142d599731806a36f1df36837a3 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Mon, 2 Nov 2026 01:10:15 +0100
+Subject: [PATCH 57/57] arm64: dts: qcom: sm6115: Feed dispcc from the
+ active-only XO
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The DSI PHY keeps its "iface" clock (disp_cc_mdss_ahb_clk) under pm_clk,
+which prepares it at probe and keeps it prepared. Its source,
+disp_cc_mdss_ahb_clk_src, runs from the dispcc XO input, and with that
+input on RPM_SMD_XO_CLK_SRC the APSS keeps a sleep-set vote on the XO
+through system suspend, so the SoC never reaches XO shutdown or vmin.
+
+The display clock controller only needs the XO while the CPUs are
+running. Use RPM_SMD_XO_A_CLK_SRC, which votes in the active set only.
+
+Tested on the F(x)tec Pro1-X (QX1050) with the PSCI system idle state:
+with RPM_SMD_XO_CLK_SRC, bi_tcxo stays prepared through suspend and RPM
+vmin count stays 0 (74.9 mA); with RPM_SMD_XO_A_CLK_SRC, nothing
+holds bi_tcxo, the SoC is in vmin for about 85% of a 5 minute sleep
+window and the battery draw drops to 37-40 mA.
+
+Disclosure: LLMGD-2 · origin O1 (the model found it from clock prepare counts captured in noirq suspend; tested on the device by the model)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ arch/arm64/boot/dts/qcom/sm6115.dtsi | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115.dtsi b/arch/arm64/boot/dts/qcom/sm6115.dtsi
+index 615f1181c..445d7fae4 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6115.dtsi
+@@ -2367,7 +2367,7 @@ mdss_dsi0_phy: phy@5e94400 {
+ 		dispcc: clock-controller@5f00000 {
+ 			compatible = "qcom,sm6115-dispcc";
+ 			reg = <0x0 0x05f00000 0 0x20000>;
+-			clocks = <&rpmcc RPM_SMD_XO_CLK_SRC>,
++			clocks = <&rpmcc RPM_SMD_XO_A_CLK_SRC>,
+ 				 <&sleep_clk>,
+ 				 <&mdss_dsi0_phy DSI_BYTE_PLL_CLK>,
+ 				 <&mdss_dsi0_phy DSI_PIXEL_PLL_CLK>,
+-- 
+2.56.0
+

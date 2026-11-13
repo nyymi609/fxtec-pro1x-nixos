@@ -1,0 +1,55 @@
+Subject: [PATCH] arm64: dts: qcom: sm6115-pro1x: fingerprint touch as a wake key
+
+The fingerprint sensor's interrupt line (TLMM 97, "microarray,gpio_irq"
+in the stock DT) goes high while a finger is on the sensor once the
+trusted app has been told to sleep (command 0xDB, mode 1), as Android's
+libfprint does in authenticate_work before it waits in madev's SLEEP
+ioctl.  Report it as KEY_WAKEUP from its own gpio-keys device, with
+wakeup-source (GPIO 97 is MPM pin 50), so touching the sensor wakes the
+phone and user space can turn the screen on.
+
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -156,6 +156,28 @@
+ 		};
+ 	};
+ 
++	/*
++	 * The fingerprint sensor's interrupt (stock "microarray,gpio_irq"):
++	 * high while a finger is on it, once pro1x-fpd has armed it (TA
++	 * command 0xDB, as Android before it waits in madev).  A key here so
++	 * that a touch wakes the phone and turns the screen on.
++	 */
++	fingerprint-keys {
++		compatible = "gpio-keys";
++		label = "Fingerprint";
++
++		pinctrl-0 = <&fp_irq_default>;
++		pinctrl-names = "default";
++
++		key-fingerprint {
++			label = "Fingerprint Touch";
++			linux,code = <KEY_WAKEUP>;
++			gpios = <&tlmm 97 GPIO_ACTIVE_HIGH>;
++			debounce-interval = <15>;
++			wakeup-source;
++		};
++	};
++
+ 	vreg_vph_pwr: regulator-vph-pwr {
+ 		compatible = "regulator-fixed";
+ 		regulator-name = "vph_pwr";
+@@ -1322,6 +1344,13 @@
+ 		bias-disable;
+ 	};
+ 
++	fp_irq_default: fp-irq-default-state {
++		pins = "gpio97";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-down;
++	};
++
+ 	hall_sensor_n: hall-sensor-n-state {
+ 		pins = "gpio96";
+ 		function = "gpio";

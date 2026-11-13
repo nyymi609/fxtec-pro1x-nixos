@@ -1,0 +1,52 @@
+From 53286f1b218693d17be94385867957babe3d0d54 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Fri, 30 Oct 2026 03:20:11 +0100
+Subject: [PATCH] wifi: ath10k: ignore channel info without a frequency
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The WCN3990 firmware (WLAN.HL.3.2.4) sends WMI channel info events with
+frequency 0 during scans; each one logged "chan info: invalid frequency
+0 (idx 41 out of bounds)", 110 lines in 72 minutes on the Pro1-X. Such
+an event names no channel: skip it with a debug message.
+
+Disclosure: LLMGD-0 · origin O1 (the model wrote the change from the log; not yet booted)
+LLMGD: v0.3; assurance=A0; flags=none; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/net/wireless/ath/ath10k/wmi.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath10k/wmi.c b/drivers/net/wireless/ath/ath10k/wmi.c
+index e57588c19..adc9c62b0 100644
+--- a/drivers/net/wireless/ath/ath10k/wmi.c
++++ b/drivers/net/wireless/ath/ath10k/wmi.c
+@@ -2733,6 +2733,12 @@ static void ath10k_wmi_event_chan_info_unpaired(struct ath10k *ar,
+ 		return;
+ 	}
+ 
++	/* WCN3990 firmware reports channel info without a channel during scans */
++	if (!params->freq) {
++		ath10k_dbg(ar, ATH10K_DBG_WMI, "chan info without frequency\n");
++		return;
++	}
++
+ 	idx = freq_to_idx(ar, params->freq);
+ 	if (idx >= ARRAY_SIZE(ar->survey)) {
+ 		ath10k_warn(ar, "chan info: invalid frequency %d (idx %d out of bounds)\n",
+@@ -2764,6 +2770,12 @@ static void ath10k_wmi_event_chan_info_paired(struct ath10k *ar,
+ 	struct survey_info *survey;
+ 	int idx;
+ 
++	/* WCN3990 firmware reports channel info without a channel during scans */
++	if (!params->freq) {
++		ath10k_dbg(ar, ATH10K_DBG_WMI, "chan info without frequency\n");
++		return;
++	}
++
+ 	idx = freq_to_idx(ar, params->freq);
+ 	if (idx >= ARRAY_SIZE(ar->survey)) {
+ 		ath10k_warn(ar, "chan info: invalid frequency %d (idx %d out of bounds)\n",
+-- 
+2.56.0
+

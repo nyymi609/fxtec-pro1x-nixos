@@ -1,0 +1,120 @@
+From 1cd4057b26aa63e1c10457e7defeef74973b7360 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Sat, 31 Oct 2026 02:14:19 +0100
+Subject: [PATCH 40/40] power: supply: pro1x-charger-icl: stay awake while
+ charging
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The PMI632 keeps charging while the system sleeps, but the battery
+driver only polls while awake, so mce's charge limit (charging_enabled)
+was noticed only at the next wake-up, by then several percent past it.
+Hold a wakeup source while USB is in and charging is on; release it when
+charging is switched off, terminates, or the cable goes.
+
+Disclosure: LLMGD-2 · origin O1 (the model wrote it from reading both pro1x drivers; built, not yet on the device)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ drivers/power/supply/pro1x-charger-icl.c | 29 ++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/drivers/power/supply/pro1x-charger-icl.c b/drivers/power/supply/pro1x-charger-icl.c
+index 161ab21a8..2c23a5d8b 100644
+--- a/drivers/power/supply/pro1x-charger-icl.c
++++ b/drivers/power/supply/pro1x-charger-icl.c
+@@ -17,6 +17,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_wakeup.h>
+ #include <linux/power_supply.h>
+ #include <linux/regmap.h>
+ #include <linux/workqueue.h>
+@@ -24,6 +25,7 @@
+ #define ICL_MAX_STATUS		0x106	/* DCDC base + 0x06 (relative to 0x1000) */
+ #define CHGR_STATUS_1		0x006
+ #define  CHGR_STATE_MASK	GENMASK(2, 0)
++#define  CHGR_STATE_TERMINATED	5
+ #define  CHGR_STATE_DISABLED	7
+ #define CHGR_ENABLE_CMD		0x042
+ #define  CHGR_ENABLE		BIT(0)
+@@ -73,6 +75,7 @@ struct pro1x_chg {
+ 	bool present;
+ 	bool recovered;
+ 	bool user_disabled;	/* charging switched off through charging_enabled */
++	bool awake;		/* holding the system awake while charging */
+ 	struct power_supply *psy;	/* "usb": cable state for usb-moded and mce */
+ 	struct power_supply_desc psy_desc;
+ 	int last_state;
+@@ -127,6 +130,25 @@ static void pro1x_chg_apply(struct pro1x_chg *c, unsigned int ma)
+ 		 before, ma, after);
+ }
+ 
++/*
++ * The charger keeps charging while the system sleeps, but the battery driver only polls
++ * while awake, so mce would see the charge limit only after the next wake-up, well past
++ * it. Stay awake while charging; once mce stops charging at the limit (or the charge
++ * terminates, or the cable goes) the system may sleep again. This also keeps the
++ * watchdog petted.
++ */
++static void pro1x_chg_set_awake(struct pro1x_chg *c, bool awake)
++{
++	if (awake == c->awake)
++		return;
++	c->awake = awake;
++	if (awake)
++		pm_stay_awake(c->dev);
++	else
++		pm_relax(c->dev);
++	dev_dbg(c->dev, "%s while charging\n", awake ? "staying awake" : "may sleep");
++}
++
+ static const enum power_supply_property pro1x_usb_props[] = {
+ 	POWER_SUPPLY_PROP_ONLINE,
+ };
+@@ -196,6 +218,7 @@ static void pro1x_chg_work(struct work_struct *w)
+ 		c->applied_ma = 0;
+ 		c->recovered = false;
+ 		c->last_state = -1;
++		pro1x_chg_set_awake(c, false);
+ 		goto out;
+ 	}
+ 
+@@ -235,6 +258,7 @@ static void pro1x_chg_work(struct work_struct *w)
+ 			}
+ 		}
+ 	}
++	pro1x_chg_set_awake(c, !c->user_disabled && c->last_state != CHGR_STATE_TERMINATED);
+ 
+ 	want = wanted_ma(apsd, snk);
+ 	if (want > icl && want > c->applied_ma) {
+@@ -278,6 +302,8 @@ static ssize_t charging_enabled_store(struct device *dev, struct device_attribut
+ 	if (ret)
+ 		return ret;
+ 	dev_info(dev, "charging %s\n", on ? "enabled" : "disabled");
++	if (!on)
++		pro1x_chg_set_awake(c, false);
+ 	return count;
+ }
+ static DEVICE_ATTR_RW(charging_enabled);
+@@ -330,6 +356,7 @@ static int pro1x_chg_probe(struct platform_device *pdev)
+ 		if (IS_ERR(c->psy))
+ 			return dev_err_probe(dev, PTR_ERR(c->psy), "usb power supply\n");
+ 	}
++	device_init_wakeup(dev, true);
+ 	INIT_DELAYED_WORK(&c->work, pro1x_chg_work);
+ 	platform_set_drvdata(pdev, c);
+ 	schedule_delayed_work(&c->work, msecs_to_jiffies(POLL_MS));
+@@ -342,6 +369,8 @@ static void pro1x_chg_remove(struct platform_device *pdev)
+ 	struct pro1x_chg *c = platform_get_drvdata(pdev);
+ 
+ 	cancel_delayed_work_sync(&c->work);
++	pro1x_chg_set_awake(c, false);
++	device_init_wakeup(&pdev->dev, false);
+ 	if (c->user_disabled)
+ 		regmap_update_bits(c->map, c->base + CHGR_ENABLE_CMD, CHGR_ENABLE, CHGR_ENABLE);
+ }
+-- 
+2.56.0
+

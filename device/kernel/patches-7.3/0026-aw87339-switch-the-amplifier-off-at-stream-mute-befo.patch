@@ -1,0 +1,199 @@
+From 4aedc0fb946ca425b20e0e3015454ae2ac45e91c Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Thu, 29 Oct 2026 23:42:09 +0100
+Subject: [PATCH] aw87339: switch the amplifier off at stream mute, before the
+ codec
+
+Every PulseAudio idle suspend (5 s after the last sound) and the sound
+card re-registration at boot gave a loud click on both speakers.
+Kernel timestamps showed why: at stream stop the RX macro mutes and the
+DSP port stops first, and DAPM only powers the amplifiers down 20-40 ms
+later, so they amplified the stop.
+
+The amplifiers are now codecs on the playback link, listed before the
+WCD9370 and the RX macro, with a mute_stream op: ASoC mutes the codecs
+in list order, so the amplifiers switch off before the RX mute and the
+port stop (verified: 94.740/94.761 amp off, 94.774 RX mute, 94.778 port
+stop). DAPM still switches them on; on unmute they come back if the
+path is up. In the DT they move from aux-devs to the front of the WCD
+playback link's codec list (#sound-dai-cells).
+
+A soft gain ramp-down in the amplifier's own power-down did not help
+(the gap, not the amplifier's switch-off, was the click).
+
+Tested: click gone at the idle suspend and at boot (by ear).
+---
+ .../boot/dts/qcom/sm6115-fxtec-pro1x.dts      |  7 +-
+ sound/soc/codecs/aw87339.c                    | 87 ++++++++++++++++---
+ 2 files changed, 81 insertions(+), 13 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index 91acd4929..8af4542b2 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -375,6 +375,7 @@ spk_amp0: speaker-amplifier@59 {
+ 		pinctrl-0 = <&spk_amp_default>;
+ 		pinctrl-names = "default";
+ 		sound-name-prefix = "Spk0";
++		#sound-dai-cells = <0>;
+ 	};
+ 
+ 	spk_amp1: speaker-amplifier@5a {
+@@ -384,6 +385,7 @@ spk_amp1: speaker-amplifier@5a {
+ 		pinctrl-0 = <&spk_amp_default>;
+ 		pinctrl-names = "default";
+ 		sound-name-prefix = "Spk1";
++		#sound-dai-cells = <0>;
+ 	};
+ };
+ 
+@@ -440,8 +442,6 @@ sound {
+ 				"Spk0 IN", "HPHL_OUT",
+ 				"Spk1 IN", "HPHR_OUT";
+ 
+-		aux-devs = <&spk_amp0>, <&spk_amp1>;
+-
+ 		/* "Spk0 OUT Switch" / "Spk1 OUT Switch" mute the speakers */
+ 		pin-switches = "Spk0 OUT", "Spk1 OUT";
+ 
+@@ -473,7 +473,8 @@ wcd-playback-dai-link {
+ 			link-name = "WCD Playback";
+ 
+ 			codec {
+-				sound-dai = <&wcd9370 0>, <&swr1 0>, <&rxmacro 0>;
++				/* the amplifiers first: they get the stream's mute before the codec */
++				sound-dai = <&spk_amp0>, <&spk_amp1>, <&wcd9370 0>, <&swr1 0>, <&rxmacro 0>;
+ 			};
+ 
+ 			cpu {
+diff --git a/sound/soc/codecs/aw87339.c b/sound/soc/codecs/aw87339.c
+index d7796abcf..fb23e4c87 100644
+--- a/sound/soc/codecs/aw87339.c
++++ b/sound/soc/codecs/aw87339.c
+@@ -23,6 +23,8 @@ struct aw87339 {
+ 	struct regmap *regmap;
+ 	struct gpio_desc *enable;
+ 	struct mutex lock;
++	bool powered;	/* the DAPM path through the amplifier is up */
++	bool on;	/* the amplifier is enabled */
+ };
+ 
+ static const struct reg_sequence aw87339_music_seq[] = {
+@@ -48,6 +50,33 @@ static const struct regmap_config aw87339_regmap = {
+ 	.max_register = AW87339_REG_MAX,
+ };
+ 
++static int aw87339_amp_on(struct device *dev, struct aw87339 *aw)
++{
++	int ret;
++
++	if (aw->on)
++		return 0;
++	gpiod_set_value_cansleep(aw->enable, 1);
++	usleep_range(2000, 3000);
++	ret = regmap_multi_reg_write(aw->regmap, aw87339_music_seq,
++				     ARRAY_SIZE(aw87339_music_seq));
++	if (ret)
++		dev_err(dev, "enable sequence failed: %d\n", ret);
++	else
++		aw->on = true;
++	return ret;
++}
++
++static void aw87339_amp_off(struct aw87339 *aw)
++{
++	if (!aw->on)
++		return;
++	regmap_write(aw->regmap, AW87339_REG_SYSCTRL, AW87339_PWR_DOWN);
++	usleep_range(10000, 12000);	/* let the output stage ramp down */
++	gpiod_set_value_cansleep(aw->enable, 0);
++	aw->on = false;
++}
++
+ static int aw87339_event(struct snd_soc_dapm_widget *w,
+ 			 struct snd_kcontrol *kcontrol, int event)
+ {
+@@ -58,17 +87,12 @@ static int aw87339_event(struct snd_soc_dapm_widget *w,
+ 	mutex_lock(&aw->lock);
+ 	switch (event) {
+ 	case SND_SOC_DAPM_POST_PMU:
+-		gpiod_set_value_cansleep(aw->enable, 1);
+-		usleep_range(2000, 3000);
+-		ret = regmap_multi_reg_write(aw->regmap, aw87339_music_seq,
+-					     ARRAY_SIZE(aw87339_music_seq));
+-		if (ret)
+-			dev_err(component->dev, "enable sequence failed: %d\n", ret);
++		aw->powered = true;
++		ret = aw87339_amp_on(component->dev, aw);
+ 		break;
+ 	case SND_SOC_DAPM_PRE_PMD:
+-		regmap_write(aw->regmap, AW87339_REG_SYSCTRL, AW87339_PWR_DOWN);
+-		usleep_range(10000, 12000);	/* let the output stage ramp down */
+-		gpiod_set_value_cansleep(aw->enable, 0);
++		aw->powered = false;
++		aw87339_amp_off(aw);
+ 		break;
+ 	}
+ 	mutex_unlock(&aw->lock);
+@@ -76,6 +100,49 @@ static int aw87339_event(struct snd_soc_dapm_widget *w,
+ 	return ret;
+ }
+ 
++/*
++ * As a codec on the playback link the amplifier gets the stream's mute before
++ * the other codecs (it comes first in the link's codec list): at stream stop
++ * it switches off before the RX macro mutes and the DSP port stops. DAPM only
++ * powers it down 20-40 ms later; in that gap it amplified the stop as a loud
++ * click on every PulseAudio idle suspend.
++ */
++static int aw87339_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
++{
++	struct aw87339 *aw = snd_soc_component_get_drvdata(dai->component);
++	int ret = 0;
++
++	if (stream != SNDRV_PCM_STREAM_PLAYBACK)
++		return 0;
++
++	mutex_lock(&aw->lock);
++	if (mute)
++		aw87339_amp_off(aw);
++	else if (aw->powered)
++		ret = aw87339_amp_on(dai->dev, aw);
++	mutex_unlock(&aw->lock);
++
++	return ret;
++}
++
++static const struct snd_soc_dai_ops aw87339_dai_ops = {
++	.mute_stream	= aw87339_mute_stream,
++	.no_capture_mute = 1,
++};
++
++static struct snd_soc_dai_driver aw87339_dai = {
++	.name = "aw87339",
++	.playback = {
++		.stream_name	= "Playback",
++		.channels_min	= 1,
++		.channels_max	= 2,
++		.rates		= SNDRV_PCM_RATE_8000_192000,
++		.formats	= SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE |
++				  SNDRV_PCM_FMTBIT_S32_LE,
++	},
++	.ops = &aw87339_dai_ops,
++};
++
+ static const struct snd_soc_dapm_widget aw87339_dapm_widgets[] = {
+ 	SND_SOC_DAPM_INPUT("IN"),
+ 	/*
+@@ -129,7 +196,7 @@ static int aw87339_i2c_probe(struct i2c_client *i2c)
+ 				     "failed to get enable gpio\n");
+ 
+ 	return devm_snd_soc_register_component(&i2c->dev, &aw87339_component,
+-					       NULL, 0);
++					       &aw87339_dai, 1);
+ }
+ 
+ static const struct i2c_device_id aw87339_i2c_id[] = {
+-- 
+2.56.0
+

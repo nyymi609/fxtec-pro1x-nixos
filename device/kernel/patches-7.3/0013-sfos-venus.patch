@@ -1,0 +1,45 @@
+From 5e1b1063cf9a4a4b9d4b3861e39faf447b12d370 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Mon, 26 Oct 2026 14:24:48 +0100
+Subject: [PATCH 13/16] sfos-venus
+
+SailfishOS build only (applied after sfos-dt): Venus video codec (AR50LT) on SM6115,
+for hardware H.264 encode in the camera app (GStreamer v4l2h264enc).
+
+Backport of Dmitry Baryshkov's "media: iris: bring up driver on SM6115-based platforms"
+v2 (2026-05): the gcc HW_CTRL_TRIGGER flag for the vcodec0 GDSC and the sm6115 venus
+node (DT patches applied by Bjorn Andersson on 2026-07-08), plus the board enable.
+The board uses linux-firmware's qcom/venus-6.0/venus.mbn
+(6.0-00055): the Fxtec vendor image is 6.0-00049, which the driver rejects (min 6.0.55).
+The qcm2290-venus fallback compatible binds the 7.1 venus driver (HFI gen1); iris in 7.1
+does not claim AR50LT.
+
+
+On v7.3 only the board enable remains: the sm6115 venus node and the gcc
+HW_CTRL_TRIGGER flag are upstream.
+
+LLMGD-0 A0
+---
+ arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+index b29c33e07..91acd4929 100644
+--- a/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
++++ b/arch/arm64/boot/dts/qcom/sm6115-fxtec-pro1x.dts
+@@ -1541,3 +1541,12 @@ camss_csiphy2_ep: endpoint {
+ 		};
+ 	};
+ };
++
++&venus {
++	/*
++	 * No firmware-name: the Fxtec image (VIDEO.VE.6.0-00049) is older than the 6.0.55
++	 * the driver requires for QCM2290 (encoder needs >= 6.0.54); the driver default
++	 * qcom/venus-6.0/venus.mbn from linux-firmware (6.0-00055) loads on this device.
++	 */
++	status = "okay";
++};
+-- 
+2.56.0
+

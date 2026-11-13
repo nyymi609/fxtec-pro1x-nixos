@@ -1,0 +1,26 @@
+From ec0636a7f1967914935034e7a7409fbdf17a74c7 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Mon, 26 Oct 2026 14:57:22 +0100
+Subject: [PATCH 16/16] pro1x-power: import the IIO_CONSUMER namespace
+
+Since v7.2 the IIO consumer API is exported in the IIO_CONSUMER namespace; modpost
+refuses pro1x-adc-battery.ko without the import.
+
+LLMGD-0 A0
+---
+ drivers/power/supply/pro1x-adc-battery.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/power/supply/pro1x-adc-battery.c b/drivers/power/supply/pro1x-adc-battery.c
+index 15d16cfa3..0d9e8835a 100644
+--- a/drivers/power/supply/pro1x-adc-battery.c
++++ b/drivers/power/supply/pro1x-adc-battery.c
+@@ -582,4 +582,5 @@ static struct platform_driver adc_battery_driver = {
+ module_platform_driver(adc_battery_driver);
+ 
+ MODULE_DESCRIPTION("Battery estimate from PMIC ADC voltage and gauge current (Pro1X)");
++MODULE_IMPORT_NS("IIO_CONSUMER");
+ MODULE_LICENSE("GPL");
+-- 
+2.56.0
+

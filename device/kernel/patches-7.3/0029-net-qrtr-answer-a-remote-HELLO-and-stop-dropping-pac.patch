@@ -1,0 +1,99 @@
+From c9fcc20418b16d156feddff816b4f91ec0c4ef54 Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Fri, 30 Oct 2026 03:01:04 +0100
+Subject: [PATCH] net: qrtr: answer a remote HELLO and stop dropping packets
+ before ours
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+7.3 moved the HELLO handshake into the core: it sends HELLO from a work
+item when the endpoint registers, drops every other packet to the node
+until that HELLO went out, and the name service no longer says hello
+back. If the modem's HELLO arrives first, the name service's
+announcement of the AP services fails with -EAGAIN ("failed to announce
+new service") and is never repeated; the modem does not learn about
+rmtfs, stalls before EFS and its watchdog fires 40 s later ("DOG detects
+stalled initialization"). On the Pro1-X that happened at 12 of 25 boots,
+every time right after the failed announcement. Keep the core's HELLO,
+but send packets that come before it as 7.2 did, and let the name
+service answer every remote HELLO again.
+
+Taken from the Lenovo TB-J606L (SM6115) port, which hit the same crash
+on 7.3: haltia-de/device-lenovo-tb-j606l kernel patch 0020, issue #31.
+
+Disclosure: LLMGD-0 · origin O1 (the model correlated the crash with the failed announcement and took the J606L port's patch; not yet run on this device)
+LLMGD: v0.3; assurance=A0; flags=none; origin=O1; origin_headline=O1; scope=kernel; graded-by=model; retrieval=none
+---
+ net/qrtr/af_qrtr.c |  8 --------
+ net/qrtr/ns.c      | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 33 insertions(+), 8 deletions(-)
+
+diff --git a/net/qrtr/af_qrtr.c b/net/qrtr/af_qrtr.c
+index e7b364742..70a194909 100644
+--- a/net/qrtr/af_qrtr.c
++++ b/net/qrtr/af_qrtr.c
+@@ -349,14 +349,6 @@ static int qrtr_node_enqueue(struct qrtr_node *node, struct sk_buff *skb,
+ 	size_t len = skb->len;
+ 	int rc, confirm_rx;
+ 
+-	mutex_lock(&node->ep_lock);
+-	if (!node->hello_sent && type != QRTR_TYPE_HELLO) {
+-		mutex_unlock(&node->ep_lock);
+-		kfree_skb(skb);
+-		return -EAGAIN;
+-	}
+-	mutex_unlock(&node->ep_lock);
+-
+ 	confirm_rx = qrtr_tx_wait(node, to->sq_node, to->sq_port, type);
+ 	if (confirm_rx < 0) {
+ 		kfree_skb(skb);
+diff --git a/net/qrtr/ns.c b/net/qrtr/ns.c
+index bcb090ee7..792f46f63 100644
+--- a/net/qrtr/ns.c
++++ b/net/qrtr/ns.c
+@@ -327,8 +327,41 @@ static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
+ 	return 0;
+ }
+ 
++static int say_hello(struct sockaddr_qrtr *dest)
++{
++	struct qrtr_ctrl_pkt pkt;
++	struct msghdr msg = { };
++	struct kvec iv;
++	int ret;
++
++	iv.iov_base = &pkt;
++	iv.iov_len = sizeof(pkt);
++
++	memset(&pkt, 0, sizeof(pkt));
++	pkt.cmd = cpu_to_le32(QRTR_TYPE_HELLO);
++
++	msg.msg_name = (struct sockaddr *)dest;
++	msg.msg_namelen = sizeof(*dest);
++
++	ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
++	if (ret < 0)
++		pr_err("failed to send hello msg\n");
++
++	return ret;
++}
++
+ static int ctrl_cmd_hello(struct sockaddr_qrtr *sq)
+ {
++	int ret;
++
++	/*
++	 * Say hello back, as before 7.3: a remote that missed the HELLO
++	 * the core sent at registration waits for one.
++	 */
++	ret = say_hello(sq);
++	if (ret < 0)
++		return ret;
++
+ 	return announce_servers(sq);
+ }
+ 
+-- 
+2.56.0
+

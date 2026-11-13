@@ -1,0 +1,112 @@
+From ab1131729f623e85ad9146dab512ca563198b86f Mon Sep 17 00:00:00 2001
+From: moWerk <mo@mowerk.net>
+Date: Wed, 28 Oct 2026 18:20:07 +0100
+Subject: [PATCH 2/2] pro1x power: battery follows the usb supply at once; Not
+ charging at a limit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The charger's "usb" supply now names the battery as its supplicant and
+the battery driver re-reads on external_power_changed instead of at its
+next 5 s poll: the charging state follows plug and unplug at once. With
+USB present and no current into the battery (a charge limit holds) the
+status is Not charging instead of Charging.
+
+Disclosure: LLMGD-2 · origin O1 (author set the goal, the model wrote the code; exercised on the device)
+LLMGD: v0.3; assurance=A2; flags=T; origin=O1; origin_headline=O1; scope=drivers/power/supply; graded-by=model; retrieval=none
+---
+ drivers/power/supply/pro1x-adc-battery.c | 19 +++++++++++++++++--
+ drivers/power/supply/pro1x-charger-icl.c |  7 ++++++-
+ 2 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/power/supply/pro1x-adc-battery.c b/drivers/power/supply/pro1x-adc-battery.c
+index 0d9e8835a..bc96b8dd2 100644
+--- a/drivers/power/supply/pro1x-adc-battery.c
++++ b/drivers/power/supply/pro1x-adc-battery.c
+@@ -85,6 +85,7 @@ MODULE_PARM_DESC(debug, "Log every poll: voltage, current, ESR, OCV, estimate");
+ 
+ struct adc_battery {
+ 	struct device *dev;
++	bool ready;		/* work initialised: external_power_changed may queue it */
+ 	struct power_supply *psy;
+ 	struct power_supply_battery_info *info;
+ 	struct iio_channel *vbat;
+@@ -219,12 +220,15 @@ static void adc_battery_learn_esr(struct adc_battery *b)
+ 		dev_info(b->dev, "esr sample %lld mOhm -> %u mOhm\n", r, esr_mohm);
+ }
+ 
+-static int adc_battery_status(struct adc_battery *b, int vbat, bool usb)
++static int adc_battery_status(struct adc_battery *b, int vbat, bool usb, bool charging)
+ {
+ 	if (!usb)
+ 		return POWER_SUPPLY_STATUS_DISCHARGING;
+ 	if (vbat >= b->full_uv)
+ 		return POWER_SUPPLY_STATUS_FULL;
++	/* USB in but no current into the battery: a charge limit holds, or input too weak */
++	if (!charging)
++		return POWER_SUPPLY_STATUS_NOT_CHARGING;
+ 	return POWER_SUPPLY_STATUS_CHARGING;
+ }
+ 
+@@ -359,7 +363,7 @@ static bool adc_battery_update(struct adc_battery *b)
+ 			new_cap = b->cap;
+ 	}
+ 	b->cap = new_cap;
+-	b->status = adc_battery_status(b, b->v_f, usb);
++	b->status = adc_battery_status(b, b->v_f, usb, charging);
+ 
+ 	if (debug)
+ 		dev_info(b->dev, "v=%d uV i=%d uA esr=%u mOhm ocv=%d uV est=%d%% q=%lld uAh cap=%d%% usb=%d gap=%lldms\n",
+@@ -453,12 +457,22 @@ static const enum power_supply_property adc_battery_props[] = {
+ 	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
+ };
+ 
++/* The charger's "usb" supply changed (plug or unplug): read now instead of at the next poll. */
++static void adc_battery_external_power_changed(struct power_supply *psy)
++{
++	struct adc_battery *b = power_supply_get_drvdata(psy);
++
++	if (b && READ_ONCE(b->ready))
++		mod_delayed_work(system_wq, &b->work, 0);
++}
++
+ static const struct power_supply_desc adc_battery_desc = {
+ 	.name = "battery",
+ 	.type = POWER_SUPPLY_TYPE_BATTERY,
+ 	.properties = adc_battery_props,
+ 	.num_properties = ARRAY_SIZE(adc_battery_props),
+ 	.get_property = adc_battery_get_property,
++	.external_power_changed = adc_battery_external_power_changed,
+ };
+ 
+ static void adc_battery_poll(struct work_struct *work)
+@@ -561,6 +575,7 @@ static int adc_battery_probe(struct platform_device *pdev)
+ 		return ret;
+ 	adc_battery_update(b);
+ 	schedule_delayed_work(&b->work, msecs_to_jiffies(POLL_MS));
++	WRITE_ONCE(b->ready, true);
+ 	dev_info(dev, "fuel gauge subtype 0x%02x, initial ESR %u mOhm\n", subtype, esr_mohm);
+ 	return 0;
+ }
+diff --git a/drivers/power/supply/pro1x-charger-icl.c b/drivers/power/supply/pro1x-charger-icl.c
+index 79fc2ff27..ddf4cbe15 100644
+--- a/drivers/power/supply/pro1x-charger-icl.c
++++ b/drivers/power/supply/pro1x-charger-icl.c
+@@ -302,7 +302,12 @@ static int pro1x_chg_probe(struct platform_device *pdev)
+ 	c->psy_desc.num_properties = ARRAY_SIZE(pro1x_usb_props);
+ 	c->psy_desc.get_property = pro1x_usb_get_property;
+ 	{
+-		struct power_supply_config cfg = { .drv_data = c };
++		static char *supplied_to[] = { "battery" };
++		struct power_supply_config cfg = {
++			.drv_data = c,
++			.supplied_to = supplied_to,
++			.num_supplicants = ARRAY_SIZE(supplied_to),
++		};
+ 
+ 		c->psy = devm_power_supply_register(dev, &c->psy_desc, &cfg);
+ 		if (IS_ERR(c->psy))
+-- 
+2.56.0
+
