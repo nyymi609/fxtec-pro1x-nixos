@@ -16,7 +16,7 @@ let
   patches = [
     "panelgap" # top_gap/bottom_gap: shorter panel mode, for dead rows / rounded corners
     "dpugap" # msm.display_top_gap/bottom_gap: full link timing, picture moved down, black gaps
-    "qrtr-modem-wake" # only the QMI services in qrtr.wake_ports wake the system (wm-suspend)
+    "qrtr-modem-wake" # only the QMI services in qrtr.wake_ports (modem, ADSP sensors) wake the system (wm-suspend)
     "charger-awake-switch" # his "awake while charging" as a module parameter
     # Fingerprint reader (modules/fingerprint.nix), from fxtec-pro1x-guix:
     "qseecom-tee" # Dawid Wróbel's QSEECOM TEE driver: loads and drives QSEE trusted apps

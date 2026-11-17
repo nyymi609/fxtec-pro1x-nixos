@@ -1,4 +1,4 @@
-{ lib, stdenv, stdenvNoCC, fetchFromGitHub, fetchurl }:
+{ lib, stdenv, stdenvNoCC, fetchFromGitHub, fetchurl, linux-pam }:
 
 # The fingerprint reader (modules/fingerprint.nix). The sensor sits on an SPI
 # bus that TrustZone owns; only the stock trusted app, mafp, can read it. The
@@ -66,6 +66,26 @@
       license = lib.licenses.gpl3Plus;
       platforms = lib.platforms.linux;
       mainProgram = "pro1x-fpd";
+    };
+  };
+
+  # A finger instead of the password for sudo and the like, through
+  # pro1x-fpd, as pam_fprintd elsewhere (ctrl+c goes to the password)
+  pam-pro1x-fpd = stdenv.mkDerivation {
+    pname = "pam-pro1x-fpd";
+    version = "0.1";
+    src = ../../device/fingerprint/pam;
+    buildInputs = [ linux-pam ];
+    buildPhase = ''
+      runHook preBuild
+      $CC -O2 -Wall -Wextra -fPIC -shared -o pam_pro1x_fpd.so pam_pro1x_fpd.c -lpam
+      runHook postBuild
+    '';
+    installPhase = "install -Dm755 pam_pro1x_fpd.so $out/lib/security/pam_pro1x_fpd.so";
+    meta = {
+      description = "PAM module for the F(x)tec Pro1X fingerprint reader (pro1x-fpd)";
+      license = lib.licenses.gpl3Plus;
+      platforms = lib.platforms.linux;
     };
   };
 }

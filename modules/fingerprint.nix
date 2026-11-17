@@ -9,16 +9,49 @@
 # Members of the users group may connect. The sensor is read only during an
 # identify or enrolment, and identify pauses while the panel is off.
 # Ported from fxtec-pro1x-guix, where enrolment and unlock work.
+#
+# PAM (pamServices, e.g. sudo): a finger first, like pam_fprintd elsewhere
+# (pam_pro1x_fpd: one identify for up to pamTimeout seconds; ctrl+c, the
+# timeout or no daemon go on to the password).
 let
   cfg = config.pro1x.fingerprint;
   fp = pkgs.pro1x-fingerprint;
 in
 {
-  options.pro1x.fingerprint.enable = lib.mkEnableOption ''
-    the fingerprint reader (proprietary trusted app from the LineageOS
-    vendor blobs; needs the kernel with the QSEECOM patches)'';
+  options.pro1x.fingerprint = {
+    enable = lib.mkEnableOption ''
+      the fingerprint reader (proprietary trusted app from the LineageOS
+      vendor blobs; needs the kernel with the QSEECOM patches)'';
+
+    pamServices = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "sudo" ];
+      example = [ "sudo" "polkit-1" ];
+      description = ''
+        PAM services that take a finger before the password. Not "login":
+        the lock screen checks the password through it and runs its own
+        identify.
+      '';
+    };
+
+    pamTimeout = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 10;
+      description = "Seconds to wait for a finger before the password.";
+    };
+  };
 
   config = lib.mkIf cfg.enable {
+    # Where pam_fprintd would be, before the password
+    security.pam.services = lib.genAttrs cfg.pamServices (service: {
+      rules.auth.pro1x-fingerprint = {
+        order = config.security.pam.services.${service}.rules.auth.fprintd.order + 1;
+        control = "sufficient";
+        modulePath = "${fp.pam-pro1x-fpd}/lib/security/pam_pro1x_fpd.so";
+        args = [ "timeout=${toString cfg.pamTimeout}" ];
+      };
+    });
+
     hardware.firmware = [ fp.mafp-firmware ];
     environment.systemPackages = [ fp.pro1x-fpd ];
 

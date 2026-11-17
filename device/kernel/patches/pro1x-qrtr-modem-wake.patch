@@ -20,9 +20,17 @@ lists the voice and messaging services' ports.
 Ours (fxtec-pro1x-guix, 2026-11-01, v4 2026-11-02).  v3 tested on the
 device (suspend holds unregistered, a call wakes it); v4 compiled only.
 
---- a/net/qrtr/af_qrtr.c	2026-11-02 01:35:37.567359444 +0100
-+++ b/net/qrtr/af_qrtr.c	2026-11-02 01:36:01.893209469 +0100
-@@ -3,6 +3,8 @@
+v5: the ADSP's IPCRTR endpoint (GLINK edge "lpass") gets a wakeup
+source too, for the sensor core's (SSC) proximity events: taking the
+phone out of a pocket wakes it.  wake_ports entries are "node:port" or
+a bare port (any node), since the ADSP (node 5) and the modem (node 0)
+number their ports separately: "46,64,5:14".  Compiled only.
+
+diff --git a/net/qrtr/af_qrtr.c b/net/qrtr/af_qrtr.c
+index 70a1949..10373b7 100644
+--- a/net/qrtr/af_qrtr.c
++++ b/net/qrtr/af_qrtr.c
+@@ -3,11 +3,15 @@
   * Copyright (c) 2015, Sony Mobile Communications Inc.
   * Copyright (c) 2013, The Linux Foundation. All rights reserved.
   */
@@ -31,7 +39,14 @@ device (suspend holds unregistered, a call wakes it); v4 compiled only.
  #include <linux/module.h>
  #include <linux/netlink.h>
  #include <linux/qrtr.h>
-@@ -160,6 +162,40 @@
+ #include <linux/termios.h>	/* For TIOCINQ/OUTQ */
+ #include <linux/spinlock.h>
++#include <linux/string.h>
++#include <linux/sysfs.h>
+ #include <linux/wait.h>
+ #include <linux/workqueue.h>
+ 
+@@ -166,6 +170,122 @@ static int qrtr_bcast_enqueue(struct qrtr_node *node, struct sk_buff *skb,
  static struct qrtr_sock *qrtr_port_lookup(int port);
  static void qrtr_port_put(struct qrtr_sock *ipc);
  
@@ -47,39 +62,121 @@ device (suspend holds unregistered, a call wakes it); v4 compiled only.
 +MODULE_PARM_DESC(wake_on_data, "Data for user space from a wakeup endpoint wakes the system");
 +
 +/*
-+ * When set, only data from these source ports wakes the system: the modem's
++ * When set, only data from these sources wakes the system: the modem's
 + * network and data services send indications every few seconds (signal,
 + * registration) and kept a suspend from holding; user space lists the ports
-+ * of the voice and messaging services (qrtr-lookup).  Empty: any port.
++ * of the voice and messaging services (qrtr-lookup), and the ADSP's sensor
++ * service for the proximity sensor.  Comma separated, each "node:port" or a
++ * bare port (any node).  Empty: any source.
 + */
-+static int wake_ports[8];
-+static int n_wake_ports;
-+module_param_array(wake_ports, int, &n_wake_ports, 0644);
-+MODULE_PARM_DESC(wake_ports, "Source ports whose data wakes the system (empty: all)");
++#define QRTR_WAKE_ANY_NODE	U32_MAX
 +
-+static bool qrtr_wake_port(u32 port)
++struct qrtr_wake_src {
++	u32 node;
++	u32 port;
++};
++
++static struct qrtr_wake_src wake_srcs[8];
++static int n_wake_srcs;
++static DEFINE_SPINLOCK(wake_srcs_lock);
++
++static int wake_ports_set(const char *val, const struct kernel_param *kp)
 +{
-+	int i, n = READ_ONCE(n_wake_ports);
++	struct qrtr_wake_src srcs[ARRAY_SIZE(wake_srcs)];
++	char *buf, *cur, *tok;
++	int n = 0, ret = 0;
 +
-+	if (!n)
-+		return true;
-+	for (i = 0; i < n && i < ARRAY_SIZE(wake_ports); i++)
-+		if (READ_ONCE(wake_ports[i]) == port)
-+			return true;
-+	return false;
++	buf = kstrdup(val, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	cur = buf;
++	while ((tok = strsep(&cur, ", \n"))) {
++		char *colon;
++
++		if (!*tok)
++			continue;
++		if (n == ARRAY_SIZE(srcs)) {
++			ret = -E2BIG;
++			goto out;
++		}
++		colon = strchr(tok, ':');
++		if (colon) {
++			*colon = '\0';
++			ret = kstrtou32(tok, 0, &srcs[n].node);
++			if (!ret)
++				ret = kstrtou32(colon + 1, 0, &srcs[n].port);
++		} else {
++			srcs[n].node = QRTR_WAKE_ANY_NODE;
++			ret = kstrtou32(tok, 0, &srcs[n].port);
++		}
++		if (ret)
++			goto out;
++		n++;
++	}
++
++	spin_lock_irq(&wake_srcs_lock);
++	memcpy(wake_srcs, srcs, n * sizeof(*srcs));
++	n_wake_srcs = n;
++	spin_unlock_irq(&wake_srcs_lock);
++out:
++	kfree(buf);
++	return ret;
++}
++
++static int wake_ports_get(char *buf, const struct kernel_param *kp)
++{
++	int i, len = 0;
++
++	spin_lock_irq(&wake_srcs_lock);
++	for (i = 0; i < n_wake_srcs; i++) {
++		if (wake_srcs[i].node == QRTR_WAKE_ANY_NODE)
++			len += sysfs_emit_at(buf, len, "%s%u", i ? "," : "",
++					     wake_srcs[i].port);
++		else
++			len += sysfs_emit_at(buf, len, "%s%u:%u", i ? "," : "",
++					     wake_srcs[i].node, wake_srcs[i].port);
++	}
++	spin_unlock_irq(&wake_srcs_lock);
++	len += sysfs_emit_at(buf, len, "\n");
++	return len;
++}
++
++static const struct kernel_param_ops wake_ports_ops = {
++	.set = wake_ports_set,
++	.get = wake_ports_get,
++};
++module_param_cb(wake_ports, &wake_ports_ops, NULL, 0644);
++MODULE_PARM_DESC(wake_ports, "Sources (node:port or port) whose data wakes the system (empty: all)");
++
++static bool qrtr_wake_src(u32 node, u32 port)
++{
++	unsigned long flags;
++	bool wake = false;
++	int i;
++
++	spin_lock_irqsave(&wake_srcs_lock, flags);
++	if (!n_wake_srcs)
++		wake = true;
++	for (i = 0; i < n_wake_srcs && !wake; i++)
++		wake = wake_srcs[i].port == port &&
++		       (wake_srcs[i].node == QRTR_WAKE_ANY_NODE ||
++			wake_srcs[i].node == node);
++	spin_unlock_irqrestore(&wake_srcs_lock, flags);
++	return wake;
 +}
 +
  /* Release node resources and free the node.
   *
   * Do not call directly, use qrtr_node_release.  To be used with
-@@ -527,6 +563,20 @@
+@@ -540,6 +660,20 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
  		if (!ipc)
  			goto err;
  
 +		if (ep->ws && cb->type == QRTR_TYPE_DATA) {
 +			bool user = !ipc->sk.sk_kern_sock;
 +			bool wake = user && READ_ONCE(wake_on_data) &&
-+				    qrtr_wake_port(cb->src_port);
++				    qrtr_wake_src(cb->src_node, cb->src_port);
 +
 +			if (pm_suspend_target_state != PM_SUSPEND_ON)
 +				pr_info_ratelimited("qrtr: data %u:%u -> %s port %u while suspending%s\n",
@@ -93,9 +190,11 @@ device (suspend holds unregistered, a call wakes it); v4 compiled only.
  		if (sock_queue_rcv_skb(&ipc->sk, skb)) {
  			qrtr_port_put(ipc);
  			goto err;
---- a/net/qrtr/qrtr.h	2026-11-02 01:35:37.591360221 +0100
-+++ b/net/qrtr/qrtr.h	2026-11-02 01:35:48.746936265 +0100
-@@ -19,6 +19,8 @@
+diff --git a/net/qrtr/qrtr.h b/net/qrtr/qrtr.h
+index de2de69..b8309d4 100644
+--- a/net/qrtr/qrtr.h
++++ b/net/qrtr/qrtr.h
+@@ -19,6 +19,8 @@ struct sk_buff;
   */
  struct qrtr_endpoint {
  	int (*xmit)(struct qrtr_endpoint *ep, struct sk_buff *skb);
@@ -104,8 +203,10 @@ device (suspend holds unregistered, a call wakes it); v4 compiled only.
  	/* private: not for endpoint use */
  	struct qrtr_node *node;
  };
---- a/net/qrtr/smd.c	2026-11-02 01:35:37.591360221 +0100
-+++ b/net/qrtr/smd.c	2026-11-02 01:35:48.747170712 +0100
+diff --git a/net/qrtr/smd.c b/net/qrtr/smd.c
+index c91bf03..30de1b0 100644
+--- a/net/qrtr/smd.c
++++ b/net/qrtr/smd.c
 @@ -4,7 +4,9 @@
   * Copyright (c) 2013, The Linux Foundation. All rights reserved.
   */
@@ -116,12 +217,13 @@ device (suspend holds unregistered, a call wakes it); v4 compiled only.
  #include <linux/skbuff.h>
  #include <linux/rpmsg.h>
  
-@@ -75,6 +77,20 @@
+@@ -75,6 +77,24 @@ static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
  
  	dev_set_drvdata(&rpdev->dev, qdev);
  
 +	/*
-+	 * The modem's channel (its GLINK edge is labelled "mpss"): its data
++	 * The modem's channel (its GLINK edge is labelled "mpss") and the
++	 * ADSP's ("lpass": the sensor core, the proximity sensor): their data
 +	 * for user space wakes a suspended system (af_qrtr.c).
 +	 */
 +	{
@@ -129,15 +231,18 @@ device (suspend holds unregistered, a call wakes it); v4 compiled only.
 +
 +		if (rpdev->dev.parent && rpdev->dev.parent->of_node &&
 +		    !of_property_read_string(rpdev->dev.parent->of_node,
-+					     "label", &label) &&
-+		    !strcmp(label, "mpss"))
-+			qdev->ep.ws = wakeup_source_register(NULL, "qrtr-modem");
++					     "label", &label)) {
++			if (!strcmp(label, "mpss"))
++				qdev->ep.ws = wakeup_source_register(NULL, "qrtr-modem");
++			else if (!strcmp(label, "lpass"))
++				qdev->ep.ws = wakeup_source_register(NULL, "qrtr-adsp");
++		}
 +	}
 +
  	dev_dbg(&rpdev->dev, "Qualcomm SMD QRTR driver probed\n");
  
  	return 0;
-@@ -85,6 +101,7 @@
+@@ -85,6 +105,7 @@ static void qcom_smd_qrtr_remove(struct rpmsg_device *rpdev)
  	struct qrtr_smd_dev *qdev = dev_get_drvdata(&rpdev->dev);
  
  	qrtr_endpoint_unregister(&qdev->ep);
