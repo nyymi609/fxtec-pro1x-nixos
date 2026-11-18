@@ -960,7 +960,27 @@ static void identify_loop(void)
 		}
 		say("nomatch");
 		retry++;
-		if (wait_touch(0, 0, LIFT_TIMEOUT, POLL_MS) < 0 || client < 0)
+		t = wait_touch(0, 0, LIFT_TIMEOUT, POLL_MS);
+		if (t < 0 || client < 0)
+			return;
+		if (t)
+			continue;
+		/*
+		 * No lift in LIFT_TIMEOUT: a reading stuck at touched (seen
+		 * under the always-on display), not a finger; it would verify
+		 * again every LIFT_TIMEOUT. Calibrated again, and no verify
+		 * until it reads untouched.
+		 */
+		logf_("no lift in %d s: calibrating again", LIFT_TIMEOUT);
+		simple(CMD_RESET_INTERRUPT_PARA);
+		simple(CMD_CALC_INTERRUPT_PARA);
+		simple(CMD_REFRESH_CALILINE);
+		do {
+			t = wait_touch(0, 0, LIFT_TIMEOUT, IDLE_POLL_MS);
+			if (t < 0)
+				return;
+		} while (!t && client >= 0);
+		if (client < 0)
 			return;
 	}
 }
